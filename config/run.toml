@@ -1,0 +1,9 @@
+project_version = "1.0.0"
+ruleset_version = "2026-08-14.1"
+model_version = "2026-08-14.1"
+evidence_cutoff = 2026-08-14
+timezone = "America/Chicago"
+numbered_species_count = 1025
+provisional_species = ["Browt", "Pombon", "Gecqua"]
+turn_cap = 200
+seed_root = 20260814

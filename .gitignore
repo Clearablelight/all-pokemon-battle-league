@@ -1,2 +1,15 @@
 .worktrees/
 .superpowers/
+.venv/
+node_modules/
+work/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+outputs/*
+!outputs/all-pokemon-battle-league-design.md
+!outputs/implementation-plans/
+!outputs/implementation-plans/**

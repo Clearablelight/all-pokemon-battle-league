@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=80,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pokemon-league"
+version = "1.0.0"
+requires-python = ">=3.12,<3.13"
+
+[project.scripts]
+pokemon-league = "pokemon_league.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
