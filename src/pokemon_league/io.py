@@ -12,6 +12,7 @@ import pandas as pd  # type: ignore[import-untyped]
 
 def _temporary_sibling(path: Path) -> Path:
     """Allocate an unpublished temporary path beside its final destination."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(
         dir=path.parent,
         prefix=f".{path.name}.",
@@ -62,6 +63,10 @@ def write_table_atomic(
     csv_path: Path | None = None,
 ) -> dict[str, str]:
     """Write deterministic Zstandard Parquet and optional UTF-8 CSV atomically."""
+    if csv_path is not None and parquet_path.resolve(strict=False) == csv_path.resolve(
+        strict=False
+    ):
+        raise ValueError("parquet_path and csv_path must be distinct destinations")
 
     def write_parquet(temporary_path: Path) -> None:
         frame.to_parquet(
