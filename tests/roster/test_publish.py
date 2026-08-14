@@ -83,6 +83,50 @@ def test_publication_preflight_rejects_normalized_target_collisions(
     assert not (tmp_path / "not-created").exists()
 
 
+def test_publication_preflight_rejects_audit_anywhere_inside_output(
+    tmp_path: Path,
+) -> None:
+    """The audit cannot be another file in the generated-output directory tree."""
+    output = tmp_path / "not-created" / "outputs"
+    audit = output / "audit" / "roster-audit.json"
+
+    with pytest.raises(ValueError, match="audit path must be outside output"):
+        preflight_publication_targets(output, audit)
+
+    assert not (tmp_path / "not-created").exists()
+
+
+def test_publication_preflight_rejects_case_only_target_alias(
+    tmp_path: Path,
+) -> None:
+    """Case-only target spellings fail closed even when every path is nonexistent."""
+    output = tmp_path / "not-created" / "outputs"
+    audit = output / "COMBATANTS.CSV"
+
+    with pytest.raises(ValueError, match="publication targets must resolve distinctly"):
+        preflight_publication_targets(output, audit)
+
+    assert not (tmp_path / "not-created").exists()
+
+
+def test_publication_preflight_rejects_unicode_normalization_target_alias(
+    tmp_path: Path,
+) -> None:
+    """Canonical Unicode aliases fail closed before nonexistent parents are created."""
+    output = tmp_path / "not-created" / "Caf\N{LATIN SMALL LETTER E WITH ACUTE}"
+    audit = (
+        tmp_path
+        / "not-created"
+        / "Cafe\N{COMBINING ACUTE ACCENT}"
+        / "combatants.csv"
+    )
+
+    with pytest.raises(ValueError, match="publication targets must resolve distinctly"):
+        preflight_publication_targets(output, audit)
+
+    assert not (tmp_path / "not-created").exists()
+
+
 def test_publication_preflight_rejects_existing_symlink_target(
     tmp_path: Path,
 ) -> None:
@@ -223,6 +267,80 @@ def test_target_sets_sharing_outputs_conflict_even_with_different_audits(
         publish_module.acquire_publication_locks(second),
     ):
         raise AssertionError("overlapping lock unexpectedly acquired")
+
+
+@pytest.mark.parametrize(
+    ("first_name", "alias_name"),
+    (
+        ("RosterOutputs", "rosteroutputs"),
+        (
+            "Caf\N{LATIN SMALL LETTER E WITH ACUTE}-outputs",
+            "Cafe\N{COMBINING ACUTE ACCENT}-outputs",
+        ),
+    ),
+)
+def test_alternate_filesystem_aliases_share_target_locks(
+    tmp_path: Path, first_name: str, alias_name: str
+) -> None:
+    """Alternate case/Unicode spellings cannot create distinct output lock keys."""
+    first = preflight_publication_targets(
+        tmp_path / first_name, tmp_path / "audit-a.json"
+    )
+    alias = preflight_publication_targets(
+        tmp_path / alias_name, tmp_path / "audit-b.json"
+    )
+
+    with (
+        publish_module.acquire_publication_locks(first),
+        pytest.raises(RuntimeError, match="publication target is locked"),
+        publish_module.acquire_publication_locks(alias),
+    ):
+        raise AssertionError("filesystem-alias lock unexpectedly acquired")
+
+
+def test_prepared_recovery_rejects_alternate_target_spelling(
+    tmp_path: Path,
+) -> None:
+    """Conservative aliases cannot redirect indexed recovery to different spellings."""
+    build, audit_model = _build_and_audit()
+    output = tmp_path / "RosterOutputs"
+    audit = tmp_path / "Audit.JSON"
+    first = preflight_publication_targets(output, audit)
+    successful_replaces = 0
+
+    def crash_after_one(source: Path, destination: Path) -> None:
+        nonlocal successful_replaces
+        if successful_replaces == 1:
+            raise SyntheticCrash()
+        os.replace(source, destination)
+        successful_replaces += 1
+
+    with pytest.raises(SyntheticCrash):
+        publish_roster_bundle(
+            build,
+            audit_model,
+            {"fixture": "0" * 64},
+            output,
+            audit,
+            replace=crash_after_one,
+        )
+
+    bytes_before_alias = {
+        path: path.read_bytes() if path.is_file() else None for path in first.paths
+    }
+    with pytest.raises(ValueError, match="target spelling mismatch"):
+        publish_roster_bundle(
+            build,
+            audit_model,
+            {"fixture": "0" * 64},
+            tmp_path / "rosteroutputs",
+            tmp_path / "audit.json",
+        )
+
+    assert {
+        path: path.read_bytes() if path.is_file() else None for path in first.paths
+    } == bytes_before_alias
+    assert first.transaction_root.is_dir()
 
 
 def test_disjoint_target_sets_can_hold_locks_concurrently(tmp_path: Path) -> None:
@@ -422,6 +540,45 @@ def test_writer_failure_preserves_preexisting_empty_parent_directories(
     assert audit_parent.is_dir() and list(audit_parent.iterdir()) == []
 
 
+def test_intervening_actor_directory_is_not_recorded_as_transaction_owned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory won by another creator between scan and mkdir survives rollback."""
+    build, audit_model = _build_and_audit()
+    output = tmp_path / "new" / "published" / "outputs"
+    audit = tmp_path / "new" / "work" / "audit" / "roster-audit.json"
+    real_mkdir = publish_module._mkdir_parent
+    actor_directory: Path | None = None
+
+    def actor_wins_first_mkdir(directory: Path) -> None:
+        nonlocal actor_directory
+        if actor_directory is None:
+            directory.mkdir()
+            actor_directory = directory
+            raise FileExistsError("synthetic concurrent directory creation")
+        real_mkdir(directory)
+
+    def fail_first_replace(source: Path, destination: Path) -> None:
+        raise OSError("synthetic first replace failure")
+
+    monkeypatch.setattr(publish_module, "_mkdir_parent", actor_wins_first_mkdir)
+    with pytest.raises(OSError, match="synthetic first replace failure"):
+        publish_roster_bundle(
+            build,
+            audit_model,
+            {"fixture": "0" * 64},
+            output,
+            audit,
+            replace=fail_first_replace,
+        )
+
+    assert actor_directory is not None
+    assert actor_directory.is_dir()
+    assert list(actor_directory.iterdir()) == []
+    assert not output.exists()
+    assert not audit.parent.exists()
+
+
 class SyntheticCrash(BaseException):
     """A process-ending fault that intentionally bypasses in-process rollback."""
 
@@ -589,4 +746,75 @@ def test_crash_recovery_removes_only_parents_created_by_transaction(
         )
 
     assert not (tmp_path / "new").exists()
+    assert list(tmp_path.rglob(".pokemon-league-transaction-*")) == []
+
+
+@pytest.mark.parametrize("crash_point", ("before", "during"))
+def test_parent_cleanup_crash_keeps_journal_and_retries_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash_point: str
+) -> None:
+    """A cleanup crash retains ownership evidence and recovery safely retries it."""
+    build, audit_model = _build_and_audit()
+    output = tmp_path / "new" / "published" / "outputs"
+    audit = tmp_path / "new" / "work" / "audit" / "roster-audit.json"
+    transaction = preflight_publication_targets(output, audit).transaction_root
+    unrelated = tmp_path / "new" / "keep" / "unrelated.txt"
+    real_cleanup = publish_module._cleanup_created_parents
+    real_remove = publish_module._remove_owned_parent
+
+    def fail_after_unrelated_file(source: Path, destination: Path) -> None:
+        unrelated.parent.mkdir()
+        unrelated.write_bytes(b"unrelated\n")
+        raise OSError("synthetic final replace failure")
+
+    if crash_point == "before":
+
+        def crash_before_cleanup(*args: object) -> None:
+            raise SyntheticCrash()
+
+        monkeypatch.setattr(
+            publish_module, "_cleanup_created_parents", crash_before_cleanup
+        )
+    else:
+
+        def crash_after_one_removal(*args: object) -> None:
+            real_remove(*args)
+            raise SyntheticCrash()
+
+        monkeypatch.setattr(
+            publish_module, "_remove_owned_parent", crash_after_one_removal
+        )
+
+    with pytest.raises(SyntheticCrash):
+        publish_roster_bundle(
+            build,
+            audit_model,
+            {"fixture": "0" * 64},
+            output,
+            audit,
+            replace=fail_after_unrelated_file,
+        )
+
+    assert (transaction / "journal.json").is_file()
+    assert unrelated.read_bytes() == b"unrelated\n"
+
+    monkeypatch.setattr(publish_module, "_cleanup_created_parents", real_cleanup)
+    monkeypatch.setattr(publish_module, "_remove_owned_parent", real_remove)
+
+    def fail_new_stage(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("stop after cleanup recovery")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_new_stage)
+    with pytest.raises(RuntimeError, match="stop after cleanup recovery"):
+        publish_roster_bundle(
+            build,
+            audit_model,
+            {"fixture": "0" * 64},
+            output,
+            audit,
+        )
+
+    assert unrelated.read_bytes() == b"unrelated\n"
+    assert not output.exists()
+    assert not audit.parent.exists()
     assert list(tmp_path.rglob(".pokemon-league-transaction-*")) == []

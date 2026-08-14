@@ -10,6 +10,7 @@ import os
 import shutil
 import stat
 import tempfile
+import unicodedata
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -30,11 +31,13 @@ ARTIFACT_COUNT = 4
 JOURNAL_KEYS = {
     "version",
     "target_set_hash",
+    "target_spelling_hash",
     "artifact_count",
     "state",
     "existed",
     "backups",
-    "created_parent_indexes",
+    "parent_intent_indexes",
+    "created_parents",
 }
 
 
@@ -44,8 +47,10 @@ class PublicationTargets:
 
     paths: tuple[Path, Path, Path, Path]
     target_set_hash: str
+    target_spelling_hash: str
     transaction_root: Path
     parent_paths: tuple[Path, ...]
+    identity_keys: tuple[str, str, str, str]
 
 
 def preflight_publication_targets(
@@ -71,8 +76,15 @@ def preflight_publication_targets(
         if target.exists() and not target.is_file():
             raise ValueError(f"publication target is not a regular file: {raw_target}")
     resolved = tuple(target.resolve(strict=False) for target in lexical_targets)
-    if len(set(resolved)) != ARTIFACT_COUNT:
+    identity_keys = tuple(_portable_path_identity(path) for path in resolved)
+    if len(set(identity_keys)) != ARTIFACT_COUNT:
         raise ValueError("publication targets must resolve distinctly")
+    output_identity = _portable_path_identity_parts(
+        Path(os.path.abspath(output)).resolve(strict=False)
+    )
+    audit_identity = _portable_path_identity_parts(resolved[3])
+    if audit_identity[: len(output_identity)] == output_identity:
+        raise ValueError("publication audit path must be outside output directory")
 
     existing_ancestors = tuple(_nearest_existing_ancestor(path) for path in resolved)
     device = device_for_path or (lambda path: path.stat().st_dev)
@@ -81,6 +93,9 @@ def preflight_publication_targets(
         raise ValueError("publication targets must reside on one filesystem")
 
     target_set_hash = hashlib.sha256(
+        "\0".join(identity_keys).encode("utf-8")
+    ).hexdigest()
+    target_spelling_hash = hashlib.sha256(
         "\0".join(str(path) for path in resolved).encode("utf-8")
     ).hexdigest()
     transaction_name = f"{TRANSACTION_PREFIX}{target_set_hash[:24]}"
@@ -100,8 +115,15 @@ def preflight_publication_targets(
     return PublicationTargets(
         paths=(resolved[0], resolved[1], resolved[2], resolved[3]),
         target_set_hash=target_set_hash,
+        target_spelling_hash=target_spelling_hash,
         transaction_root=transaction_root,
         parent_paths=parent_paths,
+        identity_keys=(
+            identity_keys[0],
+            identity_keys[1],
+            identity_keys[2],
+            identity_keys[3],
+        ),
     )
 
 
@@ -111,8 +133,11 @@ def acquire_publication_locks(targets: PublicationTargets) -> Iterator[None]:
     lock_root = _safe_lock_root()
     descriptors: list[int] = []
     try:
-        for target in sorted(targets.paths, key=str):
-            key = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
+        identities_and_targets = sorted(
+            zip(targets.identity_keys, targets.paths, strict=True)
+        )
+        for identity, target in identities_and_targets:
+            key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
             lock_path = lock_root / key
             flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
             descriptor = os.open(lock_path, flags, 0o600)
@@ -172,11 +197,11 @@ def _publish_locked(
         staged.mkdir()
         backups.mkdir()
         _fsync_directory(transaction)
-        _write_journal(targets, "building", (), (), ())
+        _write_journal(targets, "building", (), (), (), ())
         published_audit = _stage_artifacts(build, audit, input_hashes, targets, staged)
         existed = _safe_existence_map(targets.paths)
         backup_metadata = _backup_existing_targets(targets.paths, existed, backups)
-        created_parent_indexes = tuple(
+        parent_intent_indexes = tuple(
             index
             for index, path in enumerate(targets.parent_paths)
             if not path.exists()
@@ -186,9 +211,15 @@ def _publish_locked(
             "prepared",
             existed,
             backup_metadata,
-            created_parent_indexes,
+            parent_intent_indexes,
+            (),
         )
-        _create_intended_parents(targets, created_parent_indexes)
+        created_parents = _create_intended_parents(
+            targets,
+            parent_intent_indexes,
+            existed,
+            backup_metadata,
+        )
         for path in targets.paths:
             symlink = _first_symlink_component(path)
             if symlink is not None:
@@ -203,7 +234,8 @@ def _publish_locked(
             "committed",
             existed,
             backup_metadata,
-            created_parent_indexes,
+            parent_intent_indexes,
+            created_parents,
         )
     except Exception:
         journal_path = transaction / JOURNAL_NAME
@@ -319,16 +351,19 @@ def _write_journal(
     state: str,
     existed: tuple[bool, ...],
     backups: tuple[dict[str, object] | None, ...],
-    created_parent_indexes: tuple[int, ...],
+    parent_intent_indexes: tuple[int, ...],
+    created_parents: tuple[dict[str, int], ...],
 ) -> None:
     payload = {
-        "version": 2,
+        "version": 3,
         "target_set_hash": targets.target_set_hash,
+        "target_spelling_hash": targets.target_spelling_hash,
         "artifact_count": ARTIFACT_COUNT,
         "state": state,
         "existed": list(existed),
         "backups": list(backups),
-        "created_parent_indexes": list(created_parent_indexes),
+        "parent_intent_indexes": list(parent_intent_indexes),
+        "created_parents": list(created_parents),
     }
     write_json_atomic(targets.transaction_root / JOURNAL_NAME, payload)
     _fsync_directory(targets.transaction_root)
@@ -342,10 +377,12 @@ def _read_journal(targets: PublicationTargets) -> dict[str, object]:
     payload: Any = json.loads(journal_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or set(payload) != JOURNAL_KEYS:
         raise ValueError("invalid publication transaction journal schema")
-    if payload["version"] != 2 or payload["artifact_count"] != ARTIFACT_COUNT:
+    if payload["version"] != 3 or payload["artifact_count"] != ARTIFACT_COUNT:
         raise ValueError("unsupported publication transaction journal")
     if payload["target_set_hash"] != targets.target_set_hash:
         raise ValueError("publication transaction target set mismatch")
+    if payload["target_spelling_hash"] != targets.target_spelling_hash:
+        raise ValueError("publication transaction target spelling mismatch")
     if payload["state"] not in {"building", "prepared", "committed"}:
         raise ValueError("invalid publication transaction state")
     _validate_journal_maps(payload, targets)
@@ -357,21 +394,40 @@ def _validate_journal_maps(
 ) -> None:
     existed = payload["existed"]
     backups = payload["backups"]
-    parent_indexes = payload["created_parent_indexes"]
+    parent_intents = payload["parent_intent_indexes"]
+    created_parents = payload["created_parents"]
     if not isinstance(existed, list) or any(type(value) is not bool for value in existed):
         raise ValueError("invalid publication transaction existence map")
     if not isinstance(backups, list):
         raise TypeError("invalid publication transaction backup map")
-    if not isinstance(parent_indexes, list) or any(
-        type(value) is not int for value in parent_indexes
+    if not isinstance(parent_intents, list) or any(
+        type(value) is not int for value in parent_intents
     ):
         raise ValueError("invalid publication transaction parent map")
-    if parent_indexes != sorted(set(parent_indexes)) or any(
-        value < 0 or value >= len(targets.parent_paths) for value in parent_indexes
+    if parent_intents != sorted(set(parent_intents)) or any(
+        value < 0 or value >= len(targets.parent_paths) for value in parent_intents
     ):
         raise ValueError("invalid publication transaction parent map")
+    if not isinstance(created_parents, list):
+        raise TypeError("invalid publication transaction parent ownership map")
+    created_indexes: list[int] = []
+    for entry in created_parents:
+        if not isinstance(entry, dict) or set(entry) != {"index", "st_dev", "st_ino"}:
+            raise ValueError("invalid publication transaction parent ownership map")
+        if any(type(entry[key]) is not int for key in ("index", "st_dev", "st_ino")):
+            raise ValueError("invalid publication transaction parent ownership map")
+        index = entry["index"]
+        if index < 0 or index >= len(targets.parent_paths):
+            raise ValueError("invalid publication transaction parent ownership index")
+        if entry["st_dev"] < 0 or entry["st_ino"] <= 0:
+            raise ValueError("invalid publication transaction parent ownership identity")
+        created_indexes.append(index)
+    if created_indexes != sorted(set(created_indexes)) or not set(
+        created_indexes
+    ).issubset(parent_intents):
+        raise ValueError("invalid publication transaction parent ownership map")
     if payload["state"] == "building":
-        if existed or backups or parent_indexes:
+        if existed or backups or parent_intents or created_parents:
             raise ValueError("invalid building publication transaction maps")
         return
     if len(existed) != ARTIFACT_COUNT or len(backups) != ARTIFACT_COUNT:
@@ -438,8 +494,8 @@ def _restore_prepared(
         elif target.exists():
             target.unlink()
             _fsync_directory(target.parent)
-    _cleanup_transaction(targets)
     _cleanup_created_parents(targets, journal)
+    _cleanup_transaction(targets)
 
 
 def _prepare_restore_copies(
@@ -524,15 +580,19 @@ def _validate_restore_destinations(
             raise ValueError(f"unsafe publication restore destination at index {index}")
         if was_present and not target.parent.is_dir():
             raise ValueError(f"missing publication restore parent at index {index}")
-    parent_indexes = journal["created_parent_indexes"]
-    if not isinstance(parent_indexes, list):
-        raise TypeError("journal parent map was not validated")
-    for index in parent_indexes:
-        if not isinstance(index, int):
-            raise TypeError("journal parent map was not validated")
+    created_parents = _created_parent_entries(journal)
+    for entry in created_parents:
+        index = entry["index"]
         parent = targets.parent_paths[index]
-        if parent.exists() and (parent.is_symlink() or not parent.is_dir()):
-            raise ValueError(f"unsafe publication created parent at index {index}")
+        if not parent.exists():
+            continue
+        metadata = os.lstat(parent)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_dev != entry["st_dev"]
+            or metadata.st_ino != entry["st_ino"]
+        ):
+            raise ValueError(f"publication created parent identity changed at index {index}")
 
 
 def _digest_regular_nofollow(path: Path) -> tuple[str, int]:
@@ -553,24 +613,8 @@ def _digest_regular_nofollow(path: Path) -> tuple[str, int]:
 def _cleanup_created_parents(
     targets: PublicationTargets, journal: dict[str, object]
 ) -> None:
-    indexes = journal["created_parent_indexes"]
-    if not isinstance(indexes, list):
-        raise TypeError("journal parent map was not validated")
-    for index in reversed(indexes):
-        if not isinstance(index, int):
-            raise TypeError("journal parent map was not validated")
-        directory = targets.parent_paths[index]
-        if not directory.exists():
-            continue
-        if directory.is_symlink() or not directory.is_dir():
-            raise ValueError(f"unsafe publication created parent at index {index}")
-        try:
-            directory.rmdir()
-        except OSError as error:
-            if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
-                raise
-        else:
-            _fsync_directory(directory.parent)
+    for entry in reversed(_created_parent_entries(journal)):
+        _remove_owned_parent(targets.parent_paths[entry["index"]], entry)
 
 
 def _cleanup_transaction(targets: PublicationTargets) -> None:
@@ -596,12 +640,83 @@ def _safe_existence_map(paths: tuple[Path, ...]) -> tuple[bool, ...]:
 
 
 def _create_intended_parents(
-    targets: PublicationTargets, indexes: tuple[int, ...]
-) -> None:
+    targets: PublicationTargets,
+    indexes: tuple[int, ...],
+    existed: tuple[bool, ...],
+    backups: tuple[dict[str, object] | None, ...],
+) -> tuple[dict[str, int], ...]:
+    created: list[dict[str, int]] = []
     for index in indexes:
         directory = targets.parent_paths[index]
-        directory.mkdir()
+        try:
+            _mkdir_parent(directory)
+        except FileExistsError:
+            metadata = os.lstat(directory)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ValueError(
+                    f"publication parent became unsafe at index {index}"
+                ) from None
+            continue
+        metadata = os.lstat(directory)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(f"publication parent became unsafe at index {index}")
         _fsync_directory(directory)
+        _fsync_directory(directory.parent)
+        created.append(
+            {"index": index, "st_dev": metadata.st_dev, "st_ino": metadata.st_ino}
+        )
+        _write_journal(
+            targets,
+            "prepared",
+            existed,
+            backups,
+            indexes,
+            tuple(created),
+        )
+    return tuple(created)
+
+
+def _mkdir_parent(directory: Path) -> None:
+    directory.mkdir()
+
+
+def _created_parent_entries(journal: dict[str, object]) -> list[dict[str, int]]:
+    values = journal["created_parents"]
+    if not isinstance(values, list):
+        raise TypeError("journal parent ownership map was not validated")
+    entries: list[dict[str, int]] = []
+    for value in values:
+        if not isinstance(value, dict) or any(
+            not isinstance(value.get(key), int) for key in ("index", "st_dev", "st_ino")
+        ):
+            raise TypeError("journal parent ownership map was not validated")
+        entries.append(
+            {
+                "index": value["index"],
+                "st_dev": value["st_dev"],
+                "st_ino": value["st_ino"],
+            }
+        )
+    return entries
+
+
+def _remove_owned_parent(directory: Path, ownership: dict[str, int]) -> None:
+    try:
+        metadata = os.lstat(directory)
+    except FileNotFoundError:
+        return
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_dev != ownership["st_dev"]
+        or metadata.st_ino != ownership["st_ino"]
+    ):
+        return
+    try:
+        directory.rmdir()
+    except OSError as error:
+        if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+            raise
+    else:
         _fsync_directory(directory.parent)
 
 
@@ -667,6 +782,17 @@ def _first_symlink_component(path: Path) -> Path | None:
 
 def _anchor_lexically(path: Path) -> Path:
     return path if path.is_absolute() else Path.cwd() / path
+
+
+def _portable_path_identity(path: Path) -> str:
+    return "\0".join(_portable_path_identity_parts(path))
+
+
+def _portable_path_identity_parts(path: Path) -> tuple[str, ...]:
+    return tuple(
+        unicodedata.normalize("NFC", os.path.normcase(part)).casefold()
+        for part in path.parts
+    )
 
 
 def _safe_lock_root() -> Path:
