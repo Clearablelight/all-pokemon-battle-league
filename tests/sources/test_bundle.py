@@ -71,6 +71,38 @@ def test_source_bundle_accepts_only_expected_content_addressed_blob(
     assert bundle.coverage_gaps == ()
 
 
+@pytest.mark.parametrize(
+    "ledger_payload",
+    (
+        [],
+        {},
+        {"records": [], "unexpected": True},
+    ),
+)
+def test_source_bundle_requires_exact_records_envelope(
+    tmp_path: Path, ledger_payload: object
+) -> None:
+    """Publication verification rejects legacy arrays and noncanonical envelopes."""
+    root = tmp_path / "sources"
+    catalog, ledger, _, _ = _write_bundle(root)
+    ledger.write_text(json.dumps(ledger_payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exact records envelope"):
+        verify_source_bundle(root, ledger, catalog, date(2026, 8, 14))
+
+
+def test_source_bundle_requires_records_envelope_value_to_be_a_list(
+    tmp_path: Path,
+) -> None:
+    """The one allowed envelope key must contain a JSON list, not another type."""
+    root = tmp_path / "sources"
+    catalog, ledger, _, _ = _write_bundle(root)
+    ledger.write_text(json.dumps({"records": {}}) + "\n", encoding="utf-8")
+
+    with pytest.raises(TypeError, match="exact records envelope"):
+        verify_source_bundle(root, ledger, catalog, date(2026, 8, 14))
+
+
 def test_source_bundle_rejects_outside_blob_even_when_checksum_matches(
     tmp_path: Path,
 ) -> None:
@@ -111,6 +143,69 @@ def test_source_bundle_rejects_expected_name_that_is_a_symlink_escape(
 
     with pytest.raises(ValueError, match="symlink blob_path for source_id: fixture"):
         verify_source_bundle(root, ledger, catalog, date(2026, 8, 14))
+
+
+def test_source_bundle_rejects_declared_intermediate_symlink_alias(
+    tmp_path: Path,
+) -> None:
+    """A lexical alias to blobs is unsafe even when it resolves to the exact blob."""
+    root = tmp_path / "sources"
+    catalog, ledger, _, digest = _write_bundle(root)
+    alias = root / "blob-alias"
+    alias.symlink_to(root / "blobs", target_is_directory=True)
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["records"][0]["blob_path"] = str(alias / digest)
+    ledger.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="symlink blob_path for source_id: fixture"):
+        verify_source_bundle(root, ledger, catalog, date(2026, 8, 14))
+
+
+def test_source_bundle_rejects_symlink_hidden_before_dotdot(
+    tmp_path: Path,
+) -> None:
+    """Lexical walking inspects a symlink even when later `..` resolves it away."""
+    root = tmp_path / "sources"
+    catalog, ledger, _, digest = _write_bundle(root)
+    child = root / "child"
+    child.mkdir()
+    alias = root / "child-alias"
+    alias.symlink_to(child, target_is_directory=True)
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["records"][0]["blob_path"] = str(
+        alias / ".." / "blobs" / digest
+    )
+    ledger.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="symlink blob_path for source_id: fixture"):
+        verify_source_bundle(root, ledger, catalog, date(2026, 8, 14))
+
+
+def test_source_bundle_rejects_declared_symlink_root_alias(
+    tmp_path: Path,
+) -> None:
+    """A declared root alias cannot hide a lexical symlink in the blob path."""
+    root = tmp_path / "sources"
+    catalog, ledger, _, digest = _write_bundle(root)
+    alias_root = tmp_path / "sources-alias"
+    alias_root.symlink_to(root, target_is_directory=True)
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["records"][0]["blob_path"] = str(alias_root / "blobs" / digest)
+    ledger.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="symlink blob_path for source_id: fixture"):
+        verify_source_bundle(root, ledger, catalog, date(2026, 8, 14))
+
+
+def test_source_bundle_rejects_symlinked_sources_root(tmp_path: Path) -> None:
+    """The bundle root itself must be a lexical non-symlink path."""
+    root = tmp_path / "sources"
+    catalog, ledger, _, _ = _write_bundle(root)
+    alias_root = tmp_path / "sources-alias"
+    alias_root.symlink_to(root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink sources root"):
+        verify_source_bundle(alias_root, ledger, catalog, date(2026, 8, 14))
 
 
 def test_source_bundle_rejects_non_sha256_identity(tmp_path: Path) -> None:

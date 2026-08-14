@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -23,11 +25,13 @@ class VerifiedSourceBundle:
 
 
 def load_source_ledger(path: Path) -> tuple[SourceRecord, ...]:
-    """Strictly parse either the canonical records envelope or a legacy bare list."""
+    """Strictly parse the canonical publication ledger envelope."""
     payload: Any = json.loads(path.read_text(encoding="utf-8"))
-    values = payload.get("records") if isinstance(payload, dict) else payload
+    if not isinstance(payload, dict) or set(payload) != {"records"}:
+        raise ValueError("source ledger must use the exact records envelope")
+    values = payload["records"]
     if not isinstance(values, list):
-        raise TypeError("source ledger records must be a JSON array")
+        raise TypeError("source ledger exact records envelope must contain an array")
     return tuple(SourceRecord.model_validate(value) for value in values)
 
 
@@ -88,26 +92,57 @@ def verify_source_bundle(
 def _validate_blob_identities(
     sources_root: Path, records: tuple[SourceRecord, ...]
 ) -> None:
-    root = sources_root.resolve(strict=False)
+    anchored_root = _anchor_lexically(sources_root)
+    if _has_lexical_symlink_component(anchored_root):
+        raise ValueError(f"symlink sources root: {sources_root}")
+    root = Path(os.path.abspath(sources_root)).resolve(strict=False)
     blob_root = root / "blobs"
     for record in records:
-        declared = Path(record.blob_path)
+        anchored_declared = _anchor_lexically(Path(record.blob_path))
+        declared = Path(os.path.abspath(record.blob_path))
         expected = blob_root / record.sha256
-        if declared.is_symlink() or _has_symlink_component(expected.parent, root):
+        if _has_lexical_symlink_component(anchored_declared):
             raise ValueError(f"symlink blob_path for source_id: {record.source_id}")
         if declared.resolve(strict=False) != expected.resolve(strict=False):
             raise ValueError(
                 f"unexpected blob_path for source_id: {record.source_id}; "
                 f"expected {expected}"
             )
+        _assert_regular_nofollow(declared, record.source_id)
 
 
-def _has_symlink_component(path: Path, root: Path) -> bool:
-    current = path
-    while current != root:
-        if current.is_symlink():
+def _has_lexical_symlink_component(path: Path) -> bool:
+    """Inspect every existing lexical component without resolving links."""
+    anchored = _anchor_lexically(path)
+    current = Path(anchored.anchor)
+    for part in anchored.parts[1:]:
+        if part == "..":
+            current = current.parent
+            continue
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
             return True
-        if current.parent == current:
-            return True
-        current = current.parent
-    return root.is_symlink()
+    return False
+
+
+def _anchor_lexically(path: Path) -> Path:
+    return path if path.is_absolute() else Path.cwd() / path
+
+
+def _assert_regular_nofollow(path: Path, source_id: str) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise ValueError(f"unsafe blob_path for source_id: {source_id}") from error
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"unsafe blob_path for source_id: {source_id}")
+    finally:
+        os.close(descriptor)
