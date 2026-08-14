@@ -26,6 +26,10 @@ def build_roster(
     comprehensive.  Every supplied raw form must have exactly one reviewed
     decision, and every decision must identify exactly one supplied raw form.
     """
+    raw_forms = tuple(RawForm.model_validate(raw.model_dump()) for raw in raw_forms)
+    decisions = tuple(
+        FormDecision.model_validate(decision.model_dump()) for decision in decisions
+    )
     raw_by_source_id = _index_unique(raw_forms, "raw")
     decision_by_source_id = _index_unique(decisions, "decision")
     missing_raw = sorted(set(decision_by_source_id) - set(raw_by_source_id))
@@ -34,6 +38,7 @@ def build_roster(
 
     _validate_provisionals(raw_forms, decisions, config)
     combatants: list[Combatant] = []
+    combatant_ids: set[str] = set()
     exclusions: list[ExcludedForm] = []
     for raw in sorted(raw_forms, key=_raw_sort_key):
         decision = decision_by_source_id.get(raw.source_form_id)
@@ -43,7 +48,13 @@ def build_roster(
         if decision.inclusion_status is InclusionStatus.EXCLUDED:
             exclusions.append(_excluded_from(raw, decision, config.ruleset_version))
         else:
-            combatants.append(_combatant_from(raw, decision, config.ruleset_version))
+            combatant = _combatant_from(raw, decision, config.ruleset_version)
+            if combatant.combatant_id in combatant_ids:
+                raise ValueError(
+                    f"duplicate generated combatant_id: {combatant.combatant_id}"
+                )
+            combatant_ids.add(combatant.combatant_id)
+            combatants.append(combatant)
     return RosterBuild(combatants=tuple(combatants), exclusions=tuple(exclusions))
 
 
@@ -71,10 +82,16 @@ def _raw_sort_key(raw: RawForm) -> tuple[int, int, str]:
 def _validate_provisionals(
     raw_forms: Sequence[RawForm], decisions: Sequence[FormDecision], config: RunConfig
 ) -> None:
-    """Constrain provisional flags to config and check a complete input's trio."""
+    """Constrain provisional flags and enforce a claimed complete catalog."""
+    completeness_values = {raw.catalog_complete_at_cutoff for raw in raw_forms}
+    if len(completeness_values) > 1:
+        raise ValueError("mixed catalog_complete_at_cutoff flags")
+    is_complete = completeness_values == {True}
     configured = set(config.provisional_species)
+    if len(configured) != len(config.provisional_species):
+        raise ValueError("RunConfig provisional_species must not contain duplicates")
     raw_by_source_id = {raw.source_form_id: raw for raw in raw_forms}
-    provisional_names: set[str] = set()
+    provisional_counts = {name: 0 for name in configured}
     for decision in decisions:
         if not decision.provisional:
             continue
@@ -83,12 +100,25 @@ def _validate_provisionals(
             continue
         if raw.display_name not in configured:
             raise ValueError(f"provisional form is not configured: {raw.display_name}")
-        provisional_names.add(raw.display_name)
-    if raw_forms and all(raw.catalog_complete_at_cutoff for raw in raw_forms):
-        missing = sorted(configured - provisional_names)
+        if decision.inclusion_status is not InclusionStatus.INCLUDED:
+            raise ValueError("provisional decisions must be included")
+        if decision.game_profile_status.value == "complete_turn_based":
+            raise ValueError("provisional decisions cannot have complete_turn_based")
+        provisional_counts[raw.display_name] += 1
+    if is_complete:
+        missing = sorted(
+            name for name, count in provisional_counts.items() if count == 0
+        )
         if missing:
             raise ValueError(
                 f"configured provisional names missing from complete input: {missing}"
+            )
+        duplicate = sorted(
+            name for name, count in provisional_counts.items() if count > 1
+        )
+        if duplicate:
+            raise ValueError(
+                f"configured provisional name must appear exactly once: {duplicate[0]}"
             )
 
 

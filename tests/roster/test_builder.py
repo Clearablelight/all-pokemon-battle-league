@@ -1,6 +1,5 @@
 """Tests for the fail-closed conversion of audited form decisions into a roster."""
 
-import csv
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -10,8 +9,14 @@ from pydantic import ValidationError
 
 from pokemon_league.config import RunConfig, load_run_config
 from pokemon_league.roster.builder import build_roster
+from pokemon_league.roster.loader import load_form_decisions_csv
 from pokemon_league.schemas import FormDecision, RawForm
-from pokemon_league.schemas.roster import GameProfileStatus
+from pokemon_league.schemas.roster import (
+    ExcludedForm,
+    GameProfileStatus,
+    InclusionStatus,
+)
+from tests.factories import combatant_factory
 
 FIXTURE_DIR = Path(__file__).parents[1] / "fixtures" / "roster"
 
@@ -25,17 +30,8 @@ def load_raw_forms(path: Path = FIXTURE_DIR / "raw-forms.json") -> tuple[RawForm
 def load_form_decisions(
     path: Path = FIXTURE_DIR / "decisions.csv",
 ) -> tuple[FormDecision, ...]:
-    """Load decisions while decoding the CSV's explicit source-ID list."""
-    with path.open(newline="", encoding="utf-8") as handle:
-        return tuple(
-            FormDecision.model_validate(
-                {
-                    **row,
-                    "source_ids": tuple(filter(None, row.pop("source_ids").split("|"))),
-                }
-            )
-            for row in csv.DictReader(handle)
-        )
+    """Load decisions through the same strict CSV boundary as production."""
+    return load_form_decisions_csv(path)
 
 
 @pytest.fixture
@@ -218,7 +214,7 @@ def test_builder_rejects_player_legal_boss_flags(
     ("field", "value", "match"),
     (
         ("inclusion_rationale", "", "included decisions require inclusion_rationale"),
-        ("activation_rule", "", "included decisions require activation_rule"),
+        ("activation_rule", "", "must not be blank"),
         ("reason_code", "", "excluded decisions require reason_code and reason_text"),
         ("reason_text", "", "excluded decisions require reason_code and reason_text"),
     ),
@@ -291,6 +287,223 @@ def test_complete_cutoff_input_requires_every_configured_provisional_name(
         match=r"configured provisional names missing from complete input: \['Missingmon'\]",
     ):
         build_roster(complete_raw, form_decisions, incomplete_config)
+
+
+def test_builder_rejects_mixed_cutoff_completeness_flags(
+    raw_forms: tuple[RawForm, ...],
+    form_decisions: tuple[FormDecision, ...],
+    run_config: RunConfig,
+) -> None:
+    """A source input is either partial or complete, never a mixed assertion."""
+    mixed_raw = (
+        raw_forms[0].model_copy(update={"catalog_complete_at_cutoff": True}),
+        *raw_forms[1:],
+    )
+
+    with pytest.raises(ValueError, match="mixed catalog_complete_at_cutoff flags"):
+        build_roster(mixed_raw, form_decisions, run_config)
+
+
+def test_complete_cutoff_input_rejects_excluded_provisional(
+    raw_forms: tuple[RawForm, ...],
+    form_decisions: tuple[FormDecision, ...],
+    run_config: RunConfig,
+) -> None:
+    """A configured provisional name cannot be counted through an exclusion."""
+    complete_raw = tuple(
+        raw.model_copy(update={"catalog_complete_at_cutoff": True}) for raw in raw_forms
+    )
+    browt_index = next(
+        index
+        for index, decision in enumerate(form_decisions)
+        if decision.source_form_id == "browt"
+    )
+    amended = list(form_decisions)
+    amended[browt_index] = amended[browt_index].model_copy(
+        update={
+            "inclusion_status": InclusionStatus.EXCLUDED,
+            "reason_code": "synthetic_test",
+            "reason_text": "An excluded provisional must be rejected.",
+        }
+    )
+
+    with pytest.raises(ValueError, match="provisional decisions must be included"):
+        build_roster(complete_raw, amended, run_config)
+
+
+def test_complete_cutoff_input_rejects_complete_profile_for_provisional(
+    raw_forms: tuple[RawForm, ...],
+    form_decisions: tuple[FormDecision, ...],
+    run_config: RunConfig,
+) -> None:
+    """Configured provisionals cannot become game-eligible by a copied flag."""
+    complete_raw = tuple(
+        raw.model_copy(update={"catalog_complete_at_cutoff": True}) for raw in raw_forms
+    )
+    browt_index = next(
+        index
+        for index, decision in enumerate(form_decisions)
+        if decision.source_form_id == "browt"
+    )
+    amended = list(form_decisions)
+    amended[browt_index] = amended[browt_index].model_copy(
+        update={"game_profile_status": GameProfileStatus.COMPLETE_TURN_BASED}
+    )
+
+    with pytest.raises(
+        ValueError, match="provisional decisions cannot have complete_turn_based"
+    ):
+        build_roster(complete_raw, amended, run_config)
+
+
+def test_complete_cutoff_input_requires_each_configured_provisional_once(
+    raw_forms: tuple[RawForm, ...],
+    form_decisions: tuple[FormDecision, ...],
+    run_config: RunConfig,
+) -> None:
+    """A full source catalog cannot represent a provisional name twice."""
+    complete_raw = tuple(
+        raw.model_copy(update={"catalog_complete_at_cutoff": True}) for raw in raw_forms
+    )
+    browt = next(raw for raw in complete_raw if raw.source_form_id == "browt")
+    browt_decision = next(
+        decision for decision in form_decisions if decision.source_form_id == "browt"
+    )
+    duplicate_raw = browt.model_copy(
+        update={"source_form_id": "browt--alternate", "form_name": "Alternate"}
+    )
+    duplicate_decision = browt_decision.model_copy(
+        update={"source_form_id": "browt--alternate"}
+    )
+
+    with pytest.raises(
+        ValueError, match="configured provisional name must appear exactly once: Browt"
+    ):
+        build_roster(
+            (*complete_raw, duplicate_raw),
+            (*form_decisions, duplicate_decision),
+            run_config,
+        )
+
+
+def test_complete_cutoff_input_rejects_missing_configured_provisional_row(
+    raw_forms: tuple[RawForm, ...],
+    form_decisions: tuple[FormDecision, ...],
+    run_config: RunConfig,
+) -> None:
+    """A full assertion cannot omit a configured provisional source row."""
+    without_browt_raw = tuple(
+        raw.model_copy(update={"catalog_complete_at_cutoff": True})
+        for raw in raw_forms
+        if raw.source_form_id != "browt"
+    )
+    without_browt_decisions = tuple(
+        decision for decision in form_decisions if decision.source_form_id != "browt"
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"configured provisional names missing from complete input: \['Browt'\]",
+    ):
+        build_roster(without_browt_raw, without_browt_decisions, run_config)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    (
+        ("national_number", 0, "greater_than_equal"),
+        ("official_form_order", -1, "greater_than_equal"),
+        ("display_name", "   ", "must not be blank"),
+    ),
+)
+def test_builder_revalidates_copy_bypassed_raw_models(
+    raw_forms: tuple[RawForm, ...],
+    form_decisions: tuple[FormDecision, ...],
+    run_config: RunConfig,
+    field: str,
+    value: int | str,
+    match: str,
+) -> None:
+    """A model_copy update cannot circumvent raw source contract validation."""
+    invalid = raw_forms[0].model_copy(update={field: value})
+
+    with pytest.raises(ValueError, match=match):
+        build_roster((invalid, *raw_forms[1:]), form_decisions, run_config)
+
+
+def test_builder_rejects_duplicate_generated_combatant_ids(
+    raw_forms: tuple[RawForm, ...],
+    form_decisions: tuple[FormDecision, ...],
+    run_config: RunConfig,
+) -> None:
+    """Distinct source IDs cannot collide after stable-ID normalization."""
+    duplicate_raw = raw_forms[0].model_copy(
+        update={"source_form_id": "venusaur--duplicate", "official_form_order": 9}
+    )
+    duplicate_decision = form_decisions[0].model_copy(
+        update={"source_form_id": "venusaur--duplicate"}
+    )
+
+    with pytest.raises(ValueError, match="duplicate generated combatant_id: venusaur"):
+        build_roster(
+            (*raw_forms, duplicate_raw),
+            (*form_decisions, duplicate_decision),
+            run_config,
+        )
+
+
+def test_manifest_models_trim_nonblank_identifiers_and_provenance() -> None:
+    """Trimmed identifiers remain usable while whitespace-only values are rejected."""
+    raw = load_raw_forms()[0]
+    decision = load_form_decisions()[0]
+    trimmed_raw = RawForm.model_validate(
+        {
+            **raw.model_dump(),
+            "source_form_id": " venusaur ",
+            "base_species_id": " venusaur ",
+            "display_name": " Venusaur ",
+            "source_version": " fixture ",
+            "source_ids": (" official-pokedex-venusaur ",),
+        }
+    )
+    trimmed_decision = FormDecision.model_validate(
+        {
+            **decision.model_dump(),
+            "activation_rule": " persistent selected identity ",
+            "game_equivalence_hint": " venusaur ",
+            "lore_equivalence_hint": " venusaur ",
+            "inclusion_rationale": " retained ",
+            "source_ids": (" official-pokedex-venusaur ",),
+        }
+    )
+
+    assert trimmed_raw.source_form_id == "venusaur"
+    assert trimmed_raw.source_ids == ("official-pokedex-venusaur",)
+    assert trimmed_decision.inclusion_rationale == "retained"
+    with pytest.raises(ValueError, match="must not be blank"):
+        RawForm.model_validate({**raw.model_dump(), "source_ids": (" ",)})
+    with pytest.raises(ValueError, match="must not be blank"):
+        FormDecision.model_validate({**decision.model_dump(), "activation_rule": " "})
+    excluded = next(
+        item
+        for item in load_form_decisions()
+        if item.inclusion_status is InclusionStatus.EXCLUDED
+    )
+    with pytest.raises(ValueError, match="must not be blank"):
+        FormDecision.model_validate({**excluded.model_dump(), "activation_rule": " "})
+    with pytest.raises(ValueError, match="must not be blank"):
+        combatant_factory(display_name=" ")
+    with pytest.raises(ValueError, match="must not be blank"):
+        ExcludedForm.model_validate(
+            {
+                "source_form_id": "venusaur--shiny",
+                "display_name": "Venusaur Shiny",
+                "reason_code": " ",
+                "reason_text": "Cosmetic only.",
+                "source_ids": ("official-pokedex-venusaur",),
+                "ruleset_version": "fixture",
+            }
+        )
 
 
 def test_form_decision_is_frozen_and_forbids_unknown_fields() -> None:
