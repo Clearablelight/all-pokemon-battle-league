@@ -190,6 +190,36 @@ class FakeResponse:
         pass
 
 
+class StatusFailureResponse:
+    """Response double whose status lookup fails after transport has succeeded."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    @property
+    def status(self) -> int:
+        raise RuntimeError("synthetic status failure")
+
+    def read(self, size: int) -> bytes:
+        del size
+        return b""
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_fetch_https_bytes_closes_response_when_status_lookup_fails() -> None:
+    """A response acquired before status inspection must always be closed on failure."""
+    response = StatusFailureResponse()
+
+    with pytest.raises(RuntimeError, match="synthetic status failure"):
+        fetch_https_bytes(
+            "https://example.test/status-failure", transport=lambda _: response
+        )
+
+    assert response.closed
+
+
 def test_fetch_https_bytes_rejects_non_https_before_transport() -> None:
     """An insecure URL must never reach the network transport."""
     called = False

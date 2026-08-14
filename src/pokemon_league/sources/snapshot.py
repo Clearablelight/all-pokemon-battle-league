@@ -34,7 +34,8 @@ class StreamingResponse(Protocol):
 class HTTPResponse(StreamingResponse, Protocol):
     """A streaming response with an HTTP status code."""
 
-    status: int
+    @property
+    def status(self) -> int: ...
 
 
 Transport = Callable[[Request], HTTPResponse]
@@ -105,13 +106,13 @@ def fetch_https_bytes(
     for attempt in range(MAX_ATTEMPTS):
         response: StreamingResponse | None = None
         try:
-            response = opener(request)
-            status = response.status
-        except HTTPError as error:
-            response = error
-            status = error.code
-
-        try:
+            try:
+                response = opener(request)
+            except HTTPError as error:
+                response = error
+                status = error.code
+            else:
+                status = response.status
             if response is None:
                 raise AssertionError("transport returned no response")
             if status == 429 or 500 <= status <= 599:

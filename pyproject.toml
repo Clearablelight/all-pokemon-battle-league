@@ -6,12 +6,16 @@ build-backend = "setuptools.build_meta"
 name = "pokemon-league"
 version = "1.0.0"
 requires-python = ">=3.12,<3.13"
+dynamic = ["dependencies"]
 
 [project.scripts]
 pokemon-league = "pokemon_league.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.in"]}
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
