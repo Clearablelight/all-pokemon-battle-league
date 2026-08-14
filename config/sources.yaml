@@ -1,0 +1,94 @@
+sources:
+  - source_id: official-national-pokedex
+    url: https://www.pokemon.com/us/pokedex
+    source_kind: official
+    continuity_id: national-pokedex
+    required: true
+    license_note: Official public Pokédex reference.
+  - source_id: pokemon-winds-waves-reveal
+    url: https://windswaves.pokemon.com/en-us/?pubDate=20260306
+    source_kind: official
+    continuity_id: pokemon-winds-waves
+    required: true
+    license_note: Official public reveal reference.
+  - source_id: pokemon-champions-mechanics
+    url: https://www.pokemon.com/us/pokemon-news/pokemon-champions-releases-on-nintendo-switch-and-nintendo-switch-2-on-april-8-2026
+    source_kind: official
+    continuity_id: pokemon-champions
+    required: true
+    license_note: Official public mechanics context.
+  - source_id: legends-za-mega-evolution
+    url: https://legends.pokemon.com/en-us/mega-pokemon
+    source_kind: official
+    continuity_id: legends-za
+    required: true
+    license_note: Official public Mega Evolution reference.
+  - source_id: official-gigantamax-explanation
+    url: https://swordshield.pokemon.com/en-us/gameplay/gigantamax/
+    source_kind: official
+    continuity_id: pokemon-sword-shield
+    required: true
+    license_note: Official public Gigantamax reference.
+  - source_id: legends-arceus-gameplay
+    url: https://legends.arceus.pokemon.com/en-us/gameplay/
+    source_kind: official
+    continuity_id: legends-arceus
+    required: true
+    license_note: Official public gameplay reference.
+  - source_id: official-animation-catalog
+    url: https://parents.pokemon.com/en-us/animation/
+    source_kind: official
+    continuity_id: pokemon-animation
+    required: true
+    license_note: Official public animation catalog context.
+  - source_id: official-arceus-description
+    url: https://legends.arceus.pokemon.com/en-us/pokemon/arceus/
+    source_kind: official
+    continuity_id: legends-arceus
+    required: true
+    license_note: Official public Arceus description.
+  - source_id: pokemon-showdown-battle-data
+    url: https://play.pokemonshowdown.com/data/
+    source_kind: technical
+    continuity_id: pokemon-showdown
+    required: true
+    license_note: Public battle-data endpoint.
+  - source_id: pokemon-showdown-simulator-api
+    url: https://github.com/smogon/pokemon-showdown/blob/master/sim/SIMULATOR.md
+    source_kind: technical
+    continuity_id: pokemon-showdown
+    required: true
+    license_note: Public simulator API documentation.
+  - source_id: pokemon-showdown-form-model
+    url: https://github.com/smogon/pokemon-showdown/blob/master/data/FORMES.md
+    source_kind: technical
+    continuity_id: pokemon-showdown
+    required: true
+    license_note: Public form-model documentation.
+  - source_id: pokemon-showdown-team-validator-api
+    url: https://github.com/smogon/pokemon-showdown/blob/master/sim/TEAMS.md
+    source_kind: technical
+    continuity_id: pokemon-showdown
+    required: true
+    license_note: Public team-validator documentation.
+  - source_id: smogon-damage-calculator-api
+    url: https://github.com/smogon/damage-calc/blob/master/README.md
+    source_kind: technical
+    continuity_id: smogon-damage-calc
+    required: true
+    license_note: Public damage calculator documentation.
+  - source_id: pokemon-showdown-commit-b22742d
+    url: https://github.com/smogon/pokemon-showdown/tree/b22742debfdce6e640193384f5731b9030f9cb6e
+    source_kind: technical
+    continuity_id: pokemon-showdown
+    required: true
+    license_note: Pinned Pokémon Showdown source snapshot.
+    commit: b22742debfdce6e640193384f5731b9030f9cb6e
+  - source_id: smogon-calc-registry-0-11-0
+    url: https://registry.npmjs.org/@smogon/calc/0.11.0
+    source_kind: technical
+    continuity_id: smogon-damage-calc
+    required: true
+    license_note: Pinned npm package metadata.
+    package: '@smogon/calc'
+    version: 0.11.0
