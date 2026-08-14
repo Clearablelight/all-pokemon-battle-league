@@ -209,6 +209,59 @@ def test_partial_roster_validates_only_when_cutoff_counts_are_not_required() -> 
         validate_roster(build, _run_config(), True)
 
 
+@pytest.mark.parametrize(
+    ("config", "build", "message"),
+    (
+        (
+            _run_config().model_copy(update={"numbered_species_count": 2}),
+            _build(
+                _numbered(1),
+                _numbered(2),
+                *(_provisional(name) for name in ("Browt", "Pombon", "Gecqua")),
+            ),
+            "numbered_species_count must be exactly 1025",
+        ),
+        (
+            _run_config().model_copy(update={"provisional_species": ("Othermon",)}),
+            _build(
+                *(_numbered(number) for number in range(1, 1026)),
+                _provisional("Othermon"),
+            ),
+            "provisional_species must be exactly",
+        ),
+        (
+            _run_config().model_copy(update={"evidence_cutoff": date(2026, 8, 13)}),
+            _build(
+                *(_numbered(number) for number in range(1, 1026)),
+                *(_provisional(name) for name in ("Browt", "Pombon", "Gecqua")),
+            ),
+            "evidence_cutoff must be exactly 2026-08-14",
+        ),
+    ),
+)
+def test_final_cutoff_requires_frozen_project_constants(
+    config: RunConfig, build: RosterBuild, message: str
+) -> None:
+    """A caller cannot redefine the published cutoff by copying RunConfig."""
+    with pytest.raises(RosterValidationError, match=message):
+        validate_roster(build, config, True)
+
+
+def test_partial_validation_remains_configurable_for_nonpublication_use() -> None:
+    """Alternate counts remain valid only at the explicitly partial Python boundary."""
+    config = _run_config().model_copy(
+        update={
+            "numbered_species_count": 2,
+            "provisional_species": ("Othermon",),
+            "evidence_cutoff": date(2026, 8, 13),
+        }
+    )
+
+    audit = validate_roster(_build(_numbered(1)), config, False)
+
+    assert audit.numbered_species_count == 1
+
+
 def test_audit_revalidates_copied_invalid_nested_models() -> None:
     """Pydantic model-copy bypasses cannot smuggle invalid mechanics into outputs."""
     invalid = _numbered(1).model_copy(update={"mechanics_eligible": False})

@@ -12,7 +12,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 MAX_RESPONSE_BYTES = 100 * 1024 * 1024
 RESPONSE_CHUNK_BYTES = 1024 * 1024
@@ -50,9 +50,16 @@ class SourceSpec(BaseModel):
     url: str
     source_kind: str
     continuity_id: str
-    required: bool
+    required: StrictBool
     license_note: str
     publication_date: date | None = None
+
+    @field_validator(
+        "source_id", "url", "source_kind", "continuity_id", "license_note", mode="before"
+    )
+    @classmethod
+    def normalize_required_text(cls, value: object) -> str:
+        return _required_text(value)
 
 
 class SourceRecord(BaseModel):
@@ -65,12 +72,31 @@ class SourceRecord(BaseModel):
     source_kind: str
     continuity_id: str
     retrieved_at: datetime
-    sha256: str
-    byte_count: int
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    byte_count: int = Field(ge=0)
     blob_path: str
-    required: bool
+    required: StrictBool
     license_note: str
     publication_date: date | None = None
+
+    @field_validator(
+        "source_id",
+        "url",
+        "source_kind",
+        "continuity_id",
+        "blob_path",
+        "license_note",
+        mode="before",
+    )
+    @classmethod
+    def normalize_required_text(cls, value: object) -> str:
+        return _required_text(value)
+
+
+def _required_text(value: object) -> str:
+    if not isinstance(value, str) or not (trimmed := value.strip()):
+        raise ValueError("must not be blank")
+    return trimmed
 
 
 def _bounded_backoff(retry_number: int) -> float:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Iterable
+from datetime import date
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -22,6 +23,10 @@ from pokemon_league.schemas.roster import (
     PopulationStatus,
     RosterBuild,
 )
+
+FINAL_EVIDENCE_CUTOFF = date(2026, 8, 14)
+FINAL_NUMBERED_SPECIES_COUNT = 1025
+FINAL_PROVISIONAL_SPECIES = ("Browt", "Pombon", "Gecqua")
 
 
 class RosterValidationError(ValueError):
@@ -84,7 +89,20 @@ def validate_roster(
         row.national_number for row in combatants if row.national_number is not None
     }
     provisional_rows = tuple(row for row in combatants if row.provisional)
-    configured_provisionals = tuple(config.provisional_species)
+    configured_provisionals = (
+        FINAL_PROVISIONAL_SPECIES
+        if require_cutoff_counts
+        else tuple(config.provisional_species)
+    )
+    if require_cutoff_counts:
+        if config.numbered_species_count != FINAL_NUMBERED_SPECIES_COUNT:
+            errors.append("numbered_species_count must be exactly 1025")
+        if tuple(config.provisional_species) != FINAL_PROVISIONAL_SPECIES:
+            errors.append(
+                "provisional_species must be exactly ('Browt', 'Pombon', 'Gecqua')"
+            )
+        if config.evidence_cutoff != FINAL_EVIDENCE_CUTOFF:
+            errors.append("evidence_cutoff must be exactly 2026-08-14")
     if len(set(configured_provisionals)) != len(configured_provisionals):
         errors.append("RunConfig provisional_species contains duplicates")
     provisional_names = tuple(row.display_name for row in provisional_rows)
@@ -95,13 +113,13 @@ def validate_roster(
         errors=errors,
     )
     if require_cutoff_counts:
-        expected_numbers = set(range(1, config.numbered_species_count + 1))
+        expected_numbers = set(range(1, FINAL_NUMBERED_SPECIES_COUNT + 1))
         if numbered != expected_numbers:
             missing = sorted(expected_numbers - numbered)
             unexpected = sorted(numbered - expected_numbers)
             errors.append(
                 "numbered National set must be exactly "
-                f"1..{config.numbered_species_count} "
+                f"1..{FINAL_NUMBERED_SPECIES_COUNT} "
                 f"(missing={missing}, unexpected={unexpected})"
             )
 

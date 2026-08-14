@@ -364,6 +364,43 @@ def test_roster_build_refuses_every_write_without_explicit_final_gate(
     assert not audit.parent.exists()
 
 
+@pytest.mark.parametrize(
+    ("filename", "normalized_alias"),
+    (
+        ("combatants.parquet", False),
+        ("combatants.csv", False),
+        ("excluded-forms.csv", False),
+        ("combatants.parquet", True),
+        ("combatants.csv", True),
+        ("excluded-forms.csv", True),
+    ),
+)
+def test_roster_build_rejects_audit_output_collision_before_any_mutation(
+    synthetic_source_dir: tuple[Path, Path, Path, Path, Path, Path],
+    tmp_path: Path,
+    filename: str,
+    normalized_alias: bool,
+) -> None:
+    """`--audit` cannot overwrite an output through an exact or normalized alias."""
+    source_dir, catalog, raw, decisions, edges, config = synthetic_source_dir
+    untouched = tmp_path / "not-created"
+    output = untouched / "outputs"
+    audit = (
+        output / "nested" / ".." / filename
+        if normalized_alias
+        else output / filename
+    )
+
+    result = CliRunner().invoke(
+        app,
+        _build_args(source_dir, catalog, raw, decisions, edges, config, output, audit),
+    )
+
+    assert result.exit_code == 2
+    assert "publication targets must resolve distinctly" in result.output
+    assert not untouched.exists()
+
+
 def test_roster_build_leaves_destinations_untouched_on_unverified_source(
     synthetic_source_dir: tuple[Path, Path, Path, Path, Path, Path], tmp_path: Path
 ) -> None:
