@@ -1,6 +1,6 @@
 # All-Pokémon Battle League Design
 
-**Status:** Approved conversational design; awaiting review of this written specification
+**Status:** Approved design; implementation planning in progress
 
 **Date:** August 14, 2026
 
@@ -87,7 +87,7 @@ The selected identity is instantiated at full HP and free of status, so activati
 
 Per-track equivalence is explicit. Forms in the same `game_equivalence_group` reuse one mechanics result only when all modeled battle properties and legal options are identical. Forms in the same `lore_equivalence_group` reuse one lore result only when anatomy, size, behavior, powers, habitat, and evidence are also equivalent. Each group has exactly one canonical combatant ID selected by the lowest National number, then official form order, then stable ID. Alias rows point to that ID, remain searchable, and are excluded from that track's pair generation and ranking. A variant may therefore be a game alias but a separate lore entrant, or the reverse. Sex-specific or color-specific variants survive only in the tracks where a real difference exists.
 
-Consensus equivalence collapses two entries only when they share both the game and lore canonical IDs. Otherwise each retains a distinct `consensus_canonical_combatant_id`; its consensus calculation looks up the appropriate canonical result in each underlying track. This prevents cosmetic duplicates without erasing a difference that exists in only one track.
+Consensus equivalence collapses two entries only when they share both the game and lore canonical IDs. Otherwise each retains a distinct `consensus_canonical_combatant_id`; its consensus calculation looks up the appropriate canonical result in each underlying track. When the two consensus entrants resolve to the same canonical ID in exactly one underlying track, that track contributes an exact 0.5 equivalence draw with method `track_equivalence` instead of attempting a nonexistent self-pair lookup. This prevents cosmetic duplicates without erasing a difference that exists in only one track.
 
 ### 4.1 Included contestants
 
@@ -512,7 +512,7 @@ The HTML report is authored as a validated analytics artifact and packaged once 
 - Generic Tera, Z-Moves, Dynamax, ordinary items, switching, and teammates cannot leak into the format; the named Ogerpon/Terapagos and Gigantamax exceptions match their explicit fixtures.
 - Level-100 formulas, required-item interactions, Dynamax Level 0 HP scaling, three-turn Gigantamax reversion, field conflicts, and battle-state reversion checks match the pinned override table.
 - The controller cannot access future RNG and produces identical choices from identical state, build, controller version, and seed.
-- Surrogate training has exactly 10,000 stratified pairs, a frozen 80/20 split, calibrated probability totals, and saved 90% conformal diagnostics.
+- Surrogate training has exactly 10,000 stratified pairs, a frozen 7,000/1,500/1,500 fit/temperature-validation/split-conformal partition, calibrated probability totals, and saved 90% conformal diagnostics.
 - Identical source snapshot, build IDs, and seed schedule reproduce identical simulations.
 - Seat-order review begins only after at least 256 seed pairs, each containing one battle in each position. A paired permutation test at two-sided alpha 0.01 plus an absolute expected-score difference above five percentage points triggers review; the raw difference remains reported at every sample size.
 
@@ -535,6 +535,7 @@ The HTML report is authored as a validated analytics artifact and packaged once 
 - Total score equals the sum of pair scores.
 - Condorcet, Copeland, expected-points, and maximin calculations have small hand-computed fixtures.
 - Consensus includes only pairs eligible in both tracks and uses equal track weight.
+- A consensus pair whose entrants share one underlying track canonical ID receives an exact 0.5 `track_equivalence` contribution from that track and never creates or looks up a self-pair.
 - Every multi-member evolution family has all internal combinations.
 - The Bulbasaur-Ivysaur-Venusaur fixture contains exactly three internal pairs.
 
