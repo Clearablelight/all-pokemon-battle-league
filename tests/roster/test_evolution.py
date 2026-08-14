@@ -5,6 +5,8 @@ from __future__ import annotations
 import itertools
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from pokemon_league.roster.evolution import assign_evolution_metadata
@@ -220,6 +222,50 @@ def test_mapping_is_identical_under_shuffled_rows_and_edges() -> None:
     ]
 
 
+@settings(max_examples=24, deadline=None, derandomize=True)
+@given(
+    row_order=st.permutations(
+        (
+            _row("bulbasaur", 1),
+            _row("ivysaur", 2),
+            _row("venusaur", 3),
+            _row("eevee", 133),
+            _row("vaporeon", 134),
+        )
+    ),
+    edge_order=st.permutations(
+        (
+            _edge("bulbasaur", "ivysaur"),
+            _edge("ivysaur", "venusaur"),
+            _edge("eevee", "vaporeon"),
+        )
+    ),
+)
+def test_mapping_is_byte_identical_across_property_generated_permutations(
+    row_order: tuple, edge_order: tuple[EvolutionEdge, ...]
+) -> None:
+    """Independent row and edge permutations cannot affect serialized mapping."""
+    canonical_rows = (
+        _row("bulbasaur", 1),
+        _row("ivysaur", 2),
+        _row("venusaur", 3),
+        _row("eevee", 133),
+        _row("vaporeon", 134),
+    )
+    canonical_edges = (
+        _edge("bulbasaur", "ivysaur"),
+        _edge("ivysaur", "venusaur"),
+        _edge("eevee", "vaporeon"),
+    )
+    expected = assign_evolution_metadata(
+        _build(*canonical_rows), canonical_edges
+    ).model_dump_json()
+
+    actual = assign_evolution_metadata(_build(*row_order), edge_order).model_dump_json()
+
+    assert actual == expected
+
+
 @pytest.mark.parametrize(
     ("edges", "message"),
     (
@@ -249,10 +295,8 @@ def test_mapping_rejects_invalid_edges(edges: tuple[EvolutionEdge, ...], message
         assign_evolution_metadata(build, edges)
 
 
-def test_mapping_revalidates_copied_invalid_combatants_and_preserves_exclusions() -> None:
-    """The public boundary validates copied rows rather than trusting frozen models."""
-    valid = _row("bulbasaur", 1)
-    invalid = valid.model_copy(update={"evolution_stage": 0})
+def test_mapping_preserves_typed_exclusions() -> None:
+    """Successful mapping keeps the reviewed exclusion audit trail unchanged."""
     exclusion = ExcludedForm(
         source_form_id="bulbasaur--cosmetic",
         display_name="Bulbasaur Cosmetic",
@@ -262,7 +306,18 @@ def test_mapping_revalidates_copied_invalid_combatants_and_preserves_exclusions(
         ruleset_version="fixture",
     )
 
+    mapped = assign_evolution_metadata(
+        RosterBuild(combatants=(_row("bulbasaur", 1),), exclusions=(exclusion,)), ()
+    )
+
+    assert mapped.exclusions == (exclusion,)
+    assert isinstance(mapped.exclusions[0], ExcludedForm)
+
+
+def test_mapping_revalidates_copied_invalid_combatants() -> None:
+    """The public boundary validates copied rows rather than trusting frozen models."""
+    valid = _row("bulbasaur", 1)
+    invalid = valid.model_copy(update={"evolution_stage": 0})
+
     with pytest.raises(ValidationError, match="greater than or equal to 1"):
-        assign_evolution_metadata(
-            RosterBuild(combatants=(invalid,), exclusions=(exclusion,)), ()
-        )
+        assign_evolution_metadata(RosterBuild(combatants=(invalid,), exclusions=()), ())

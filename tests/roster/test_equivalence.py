@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from pokemon_league.roster.equivalence import (
     GAME_FINGERPRINT_FIELDS,
@@ -84,6 +86,36 @@ def test_canonicalization_uses_declared_sort_key_and_is_input_order_independent(
     assert {row.lore_canonical_combatant_id for row in forward.combatants} == {"omega"}
     member_ids = {row.combatant_id for row in forward.combatants}
     assert {row.consensus_canonical_combatant_id for row in forward.combatants} <= member_ids
+
+
+@settings(max_examples=24, deadline=None, derandomize=True)
+@given(
+    row_order=st.permutations(
+        (
+            _row("alpha", 5, game_group="game-plant", lore_group="lore-alpha"),
+            _row("beta", 1, game_group="game-plant", lore_group="lore-beta"),
+            _row("gamma", 3, game_group="game-gamma", lore_group="lore-water"),
+            _row("delta", 2, game_group="game-delta", lore_group="lore-water"),
+            _row("epsilon", None, game_group="game-epsilon", lore_group="lore-epsilon"),
+        )
+    )
+)
+def test_canonicalization_is_byte_identical_across_property_generated_permutations(
+    row_order: tuple,
+) -> None:
+    """Multiple game/lore group layouts remain byte-stable under row permutations."""
+    canonical_rows = (
+        _row("alpha", 5, game_group="game-plant", lore_group="lore-alpha"),
+        _row("beta", 1, game_group="game-plant", lore_group="lore-beta"),
+        _row("gamma", 3, game_group="game-gamma", lore_group="lore-water"),
+        _row("delta", 2, game_group="game-delta", lore_group="lore-water"),
+        _row("epsilon", None, game_group="game-epsilon", lore_group="lore-epsilon"),
+    )
+    expected = canonicalize_tracks(_build(*canonical_rows)).model_dump_json()
+
+    actual = canonicalize_tracks(_build(*row_order)).model_dump_json()
+
+    assert actual == expected
 
 
 def test_game_aliases_may_have_distinct_lore_properties() -> None:
