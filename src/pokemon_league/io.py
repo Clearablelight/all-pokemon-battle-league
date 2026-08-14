@@ -89,3 +89,17 @@ def write_table_atomic(
 
         digests["csv"] = _write_atomically(csv_path, write_csv)
     return digests
+
+
+def write_csv_atomic(frame: pd.DataFrame, path: Path) -> str:
+    """Write one deterministic UTF-8 LF CSV atomically and return its hash."""
+
+    def write_csv(temporary_path: Path) -> None:
+        frame.to_csv(
+            temporary_path,
+            encoding="utf-8",
+            index=False,
+            lineterminator="\n",
+        )
+
+    return _write_atomically(path, write_csv)
