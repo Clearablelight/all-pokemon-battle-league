@@ -321,6 +321,28 @@ class ExcludedForm(BaseModel):
         return _source_ids(value)
 
 
+class EvolutionEdge(BaseModel):
+    """One pinned, sourced directed base-species evolution relation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    predecessor_species_id: str = Field(min_length=1)
+    successor_species_id: str = Field(min_length=1)
+    source_ids: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("predecessor_species_id", "successor_species_id", mode="before")
+    @classmethod
+    def normalize_required_text(cls, value: object) -> str:
+        """Normalize base-species IDs without accepting blank identifiers."""
+        return _required_text(value)
+
+    @field_validator("source_ids", mode="before")
+    @classmethod
+    def normalize_source_ids(cls, value: object) -> tuple[str, ...]:
+        """Require ordered, unique provenance for every pinned edge."""
+        return _source_ids(value)
+
+
 class RosterBuild(BaseModel):
     """The included and excluded records derived from one ruleset revision."""
 

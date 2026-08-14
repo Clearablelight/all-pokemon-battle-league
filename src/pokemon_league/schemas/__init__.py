@@ -3,6 +3,7 @@
 from pokemon_league.schemas.common import PairKey, stable_id
 from pokemon_league.schemas.roster import (
     Combatant,
+    EvolutionEdge,
     ExcludedForm,
     FormDecision,
     RawForm,
@@ -11,6 +12,7 @@ from pokemon_league.schemas.roster import (
 
 __all__ = [
     "Combatant",
+    "EvolutionEdge",
     "ExcludedForm",
     "FormDecision",
     "PairKey",
