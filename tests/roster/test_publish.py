@@ -487,10 +487,10 @@ def test_publication_backups_are_independent_of_in_place_original_changes(
     assert {path: path.read_bytes() for path in old_bytes} == old_bytes
 
 
-def test_writer_failure_removes_only_newly_created_parent_directories(
+def test_writer_failure_may_leave_new_destination_parent_directories(
     tmp_path: Path,
 ) -> None:
-    """Rollback removes empty parents created for this bundle, deepest first."""
+    """Rollback never risks deleting destination ancestors after a failed publish."""
     build, audit_model = _build_and_audit()
     output = tmp_path / "new" / "published" / "outputs"
     audit = tmp_path / "new" / "work" / "audit" / "roster-audit.json"
@@ -508,7 +508,8 @@ def test_writer_failure_removes_only_newly_created_parent_directories(
             replace=fail_first_replace,
         )
 
-    assert not (tmp_path / "new").exists()
+    assert output.is_dir() and list(output.iterdir()) == []
+    assert audit.parent.is_dir() and list(audit.parent.iterdir()) == []
     assert list(tmp_path.rglob(".pokemon-league-transaction-*")) == []
 
 
@@ -540,7 +541,7 @@ def test_writer_failure_preserves_preexisting_empty_parent_directories(
     assert audit_parent.is_dir() and list(audit_parent.iterdir()) == []
 
 
-def test_intervening_actor_directory_is_not_recorded_as_transaction_owned(
+def test_intervening_actor_destination_directory_survives_rollback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A directory won by another creator between scan and mkdir survives rollback."""
@@ -574,9 +575,8 @@ def test_intervening_actor_directory_is_not_recorded_as_transaction_owned(
 
     assert actor_directory is not None
     assert actor_directory.is_dir()
-    assert list(actor_directory.iterdir()) == []
-    assert not output.exists()
-    assert not audit.parent.exists()
+    assert output.is_dir() and list(output.iterdir()) == []
+    assert audit.parent.is_dir() and list(audit.parent.iterdir()) == []
 
 
 class SyntheticCrash(BaseException):
@@ -706,10 +706,10 @@ def test_recovery_prevalidates_every_backup_before_mutating_any_target(
     assert transaction.is_dir()
 
 
-def test_crash_recovery_removes_only_parents_created_by_transaction(
+def test_crash_recovery_leaves_destination_parents_in_place(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Prepared recovery finds stable transaction state and cleans created parents."""
+    """Prepared recovery removes owned files but never destination ancestors."""
     build, audit_model = _build_and_audit()
     output = tmp_path / "new" / "published" / "outputs"
     audit = tmp_path / "new" / "work" / "audit" / "roster-audit.json"
@@ -745,76 +745,84 @@ def test_crash_recovery_removes_only_parents_created_by_transaction(
             audit,
         )
 
-    assert not (tmp_path / "new").exists()
+    assert output.is_dir() and list(output.iterdir()) == []
+    assert audit.parent.is_dir() and list(audit.parent.iterdir()) == []
     assert list(tmp_path.rglob(".pokemon-league-transaction-*")) == []
 
 
-@pytest.mark.parametrize("crash_point", ("before", "during"))
-def test_parent_cleanup_crash_keeps_journal_and_retries_safely(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash_point: str
+def test_rollback_preserves_destination_replaced_immediately_after_mkdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A cleanup crash retains ownership evidence and recovery safely retries it."""
+    """An actor replacing a just-created destination directory retains ownership."""
     build, audit_model = _build_and_audit()
     output = tmp_path / "new" / "published" / "outputs"
     audit = tmp_path / "new" / "work" / "audit" / "roster-audit.json"
-    transaction = preflight_publication_targets(output, audit).transaction_root
-    unrelated = tmp_path / "new" / "keep" / "unrelated.txt"
-    real_cleanup = publish_module._cleanup_created_parents
-    real_remove = publish_module._remove_owned_parent
+    original_output = tmp_path / "new" / "published" / "original-output"
+    real_mkdir = publish_module._mkdir_parent
+    replacement_inode: int | None = None
 
-    def fail_after_unrelated_file(source: Path, destination: Path) -> None:
-        unrelated.parent.mkdir()
-        unrelated.write_bytes(b"unrelated\n")
+    def fail_after_parents(source: Path, destination: Path) -> None:
         raise OSError("synthetic final replace failure")
 
-    if crash_point == "before":
+    def replace_after_mkdir(directory: Path) -> None:
+        nonlocal replacement_inode
+        real_mkdir(directory)
+        if directory == output:
+            output.rename(original_output)
+            output.mkdir()
+            replacement_inode = os.lstat(output).st_ino
 
-        def crash_before_cleanup(*args: object) -> None:
-            raise SyntheticCrash()
-
-        monkeypatch.setattr(
-            publish_module, "_cleanup_created_parents", crash_before_cleanup
-        )
-    else:
-
-        def crash_after_one_removal(*args: object) -> None:
-            real_remove(*args)
-            raise SyntheticCrash()
-
-        monkeypatch.setattr(
-            publish_module, "_remove_owned_parent", crash_after_one_removal
-        )
-
-    with pytest.raises(SyntheticCrash):
+    monkeypatch.setattr(publish_module, "_mkdir_parent", replace_after_mkdir)
+    with pytest.raises(OSError, match="synthetic final replace failure"):
         publish_roster_bundle(
             build,
             audit_model,
             {"fixture": "0" * 64},
             output,
             audit,
-            replace=fail_after_unrelated_file,
+            replace=fail_after_parents,
         )
 
-    assert (transaction / "journal.json").is_file()
-    assert unrelated.read_bytes() == b"unrelated\n"
-
-    monkeypatch.setattr(publish_module, "_cleanup_created_parents", real_cleanup)
-    monkeypatch.setattr(publish_module, "_remove_owned_parent", real_remove)
-
-    def fail_new_stage(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("stop after cleanup recovery")
-
-    monkeypatch.setattr(pd.DataFrame, "to_parquet", fail_new_stage)
-    with pytest.raises(RuntimeError, match="stop after cleanup recovery"):
-        publish_roster_bundle(
-            build,
-            audit_model,
-            {"fixture": "0" * 64},
-            output,
-            audit,
-        )
-
-    assert unrelated.read_bytes() == b"unrelated\n"
-    assert not output.exists()
-    assert not audit.parent.exists()
+    assert replacement_inode is not None
+    assert output.is_dir() and os.lstat(output).st_ino == replacement_inode
+    assert original_output.is_dir()
     assert list(tmp_path.rglob(".pokemon-league-transaction-*")) == []
+
+
+def test_rollback_never_attempts_post_check_destination_parent_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rollback has no destination rmdir step in which an actor can substitute an inode."""
+    build, audit_model = _build_and_audit()
+    output = tmp_path / "new" / "published" / "outputs"
+    audit = tmp_path / "new" / "work" / "audit" / "roster-audit.json"
+    targets = preflight_publication_targets(output, audit)
+    destination_parents = set(targets.parent_paths)
+    real_rmdir = Path.rmdir
+    deletion_attempts: list[Path] = []
+
+    def substitute_after_check_then_rmdir(directory: Path) -> None:
+        if directory in destination_parents:
+            deletion_attempts.append(directory)
+            checked = directory.with_name(f"{directory.name}-checked-inode")
+            directory.rename(checked)
+            directory.mkdir()
+        real_rmdir(directory)
+
+    def fail_after_parents(source: Path, destination: Path) -> None:
+        raise OSError("synthetic final replace failure")
+
+    monkeypatch.setattr(Path, "rmdir", substitute_after_check_then_rmdir)
+    with pytest.raises(OSError, match="synthetic final replace failure"):
+        publish_roster_bundle(
+            build,
+            audit_model,
+            {"fixture": "0" * 64},
+            output,
+            audit,
+            replace=fail_after_parents,
+        )
+
+    assert deletion_attempts == []
+    assert output.is_dir() and list(output.iterdir()) == []
+    assert audit.parent.is_dir() and list(audit.parent.iterdir()) == []

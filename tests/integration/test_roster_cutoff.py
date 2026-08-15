@@ -16,6 +16,7 @@ import pytest
 from typer.testing import CliRunner
 
 import pokemon_league.cli as league_cli
+import pokemon_league.input_capture as capture_module
 from pokemon_league.cli import app
 from pokemon_league.roster.loader import DECISION_CSV_HEADER
 from pokemon_league.schemas.roster import Combatant, ExcludedForm
@@ -534,6 +535,210 @@ def test_full_synthetic_cutoff_pipeline_exports_stable_schemas_hashes_and_order(
         "combatants.parquet": _sha256(parquet_path),
         "excluded-forms.csv": _sha256(exclusions_path),
     }
+
+
+@pytest.mark.parametrize(
+    ("input_name", "audit_key"),
+    (
+        ("catalog", "catalog"),
+        ("config", "config"),
+        ("ledger", "source_ledger"),
+        ("raw", "raw_forms"),
+        ("decisions", "decisions"),
+        ("edges", "evolution_edges"),
+    ),
+)
+def test_roster_audit_hashes_the_exact_captured_input_bytes(
+    synthetic_source_dir: tuple[Path, Path, Path, Path, Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    input_name: str,
+    audit_key: str,
+) -> None:
+    """Replacing any path after capture cannot change parsed bytes or its audit hash."""
+    source_dir, catalog, raw, decisions, edges, config = synthetic_source_dir
+    inputs = {
+        "catalog": catalog,
+        "config": config,
+        "ledger": source_dir / "source-ledger.json",
+        "raw": raw,
+        "decisions": decisions,
+        "edges": edges,
+    }
+    target = inputs[input_name]
+    expected_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    real_capture = league_cli.capture_regular_file
+    replaced = False
+
+    def capture_then_replace(path: Path):
+        nonlocal replaced
+        captured = real_capture(path)
+        if path == target and not replaced:
+            replacement = target.with_name(f".{target.name}.replacement")
+            replacement.write_bytes(b"not the consumed input\n")
+            replacement.replace(target)
+            replaced = True
+        return captured
+
+    monkeypatch.setattr(league_cli, "capture_regular_file", capture_then_replace)
+    output = tmp_path / f"published-{input_name}"
+    audit_path = tmp_path / "work" / input_name / "roster-audit.json"
+
+    result = CliRunner().invoke(
+        app,
+        _build_args(source_dir, catalog, raw, decisions, edges, config, output, audit_path),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert replaced is True
+    audit_payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit_payload["input_hashes"][audit_key] == expected_digest
+
+
+@pytest.mark.parametrize(
+    "input_name",
+    ("catalog", "config", "ledger", "raw", "decisions", "edges"),
+)
+def test_in_place_input_mutation_fails_before_any_publication_write(
+    synthetic_source_dir: tuple[Path, Path, Path, Path, Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    input_name: str,
+) -> None:
+    """Every consumed path uses the stable descriptor boundary and fails closed."""
+    source_dir, catalog, raw, decisions, edges, config = synthetic_source_dir
+    target = {
+        "catalog": catalog,
+        "config": config,
+        "ledger": source_dir / "source-ledger.json",
+        "raw": raw,
+        "decisions": decisions,
+        "edges": edges,
+    }[input_name]
+    real_capture = league_cli.capture_regular_file
+    real_read = capture_module._read_descriptor
+
+    def capture_with_in_place_mutation(path: Path):
+        if path != target:
+            return real_capture(path)
+
+        def read_then_mutate(descriptor: int) -> bytes:
+            data = real_read(descriptor)
+            path.write_bytes(b"mutated while descriptor remained open\n")
+            return data
+
+        monkeypatch.setattr(capture_module, "_read_descriptor", read_then_mutate)
+        try:
+            return real_capture(path)
+        finally:
+            monkeypatch.setattr(capture_module, "_read_descriptor", real_read)
+
+    monkeypatch.setattr(
+        league_cli, "capture_regular_file", capture_with_in_place_mutation
+    )
+    output = tmp_path / f"failed-{input_name}"
+    audit_path = tmp_path / "work" / input_name / "roster-audit.json"
+
+    result = CliRunner().invoke(
+        app,
+        _build_args(source_dir, catalog, raw, decisions, edges, config, output, audit_path),
+    )
+
+    assert result.exit_code == 2
+    assert "input changed while being captured" in result.output
+    assert not output.exists()
+    assert not audit_path.parent.exists()
+
+
+def test_roster_audit_uses_the_blob_digest_verified_from_captured_bytes(
+    synthetic_source_dir: tuple[Path, Path, Path, Path, Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blob path replacement after verification cannot alter its recorded evidence."""
+    from pokemon_league.sources import bundle as bundle_module
+
+    source_dir, catalog, raw, decisions, edges, config = synthetic_source_dir
+    ledger_payload = json.loads(
+        (source_dir / "source-ledger.json").read_text(encoding="utf-8")
+    )
+    blob = Path(ledger_payload["records"][0]["blob_path"])
+    expected_digest = hashlib.sha256(blob.read_bytes()).hexdigest()
+    real_capture = bundle_module.capture_regular_file
+    replaced = False
+
+    def capture_then_replace(path: Path):
+        nonlocal replaced
+        captured = real_capture(path)
+        if path == blob and not replaced:
+            replacement = blob.with_name(f".{blob.name}.replacement")
+            replacement.write_bytes(b"not the verified blob\n")
+            replacement.replace(blob)
+            replaced = True
+        return captured
+
+    monkeypatch.setattr(bundle_module, "capture_regular_file", capture_then_replace)
+    output = tmp_path / "published-blob"
+    audit_path = tmp_path / "work" / "blob" / "roster-audit.json"
+
+    result = CliRunner().invoke(
+        app,
+        _build_args(source_dir, catalog, raw, decisions, edges, config, output, audit_path),
+    )
+
+    assert result.exit_code == 0, result.output
+    assert replaced is True
+    audit_payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    assert audit_payload["input_hashes"]["source_blob:synthetic-roster"] == expected_digest
+
+
+def test_in_place_blob_mutation_fails_before_any_publication_write(
+    synthetic_source_dir: tuple[Path, Path, Path, Path, Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Source evidence changing during verification is rejected without outputs."""
+    from pokemon_league.sources import bundle as bundle_module
+
+    source_dir, catalog, raw, decisions, edges, config = synthetic_source_dir
+    ledger_payload = json.loads(
+        (source_dir / "source-ledger.json").read_text(encoding="utf-8")
+    )
+    blob = Path(ledger_payload["records"][0]["blob_path"])
+    real_capture = bundle_module.capture_regular_file
+    real_read = capture_module._read_descriptor
+
+    def capture_with_in_place_mutation(path: Path):
+        if path != blob:
+            return real_capture(path)
+
+        def read_then_mutate(descriptor: int) -> bytes:
+            data = real_read(descriptor)
+            path.chmod(0o600)
+            path.write_bytes(b"mutated source evidence\n")
+            return data
+
+        monkeypatch.setattr(capture_module, "_read_descriptor", read_then_mutate)
+        try:
+            return real_capture(path)
+        finally:
+            monkeypatch.setattr(capture_module, "_read_descriptor", real_read)
+
+    monkeypatch.setattr(
+        bundle_module, "capture_regular_file", capture_with_in_place_mutation
+    )
+    output = tmp_path / "failed-blob"
+    audit_path = tmp_path / "work" / "blob-failure" / "roster-audit.json"
+
+    result = CliRunner().invoke(
+        app,
+        _build_args(source_dir, catalog, raw, decisions, edges, config, output, audit_path),
+    )
+
+    assert result.exit_code == 2
+    assert "unsafe blob_path for source_id: synthetic-roster" in result.output
+    assert not output.exists()
+    assert not audit_path.parent.exists()
 
 
 def test_writer_failure_publishes_no_final_files_or_orphan_temps(

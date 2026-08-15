@@ -72,6 +72,34 @@ def test_source_bundle_accepts_only_expected_content_addressed_blob(
 
 
 @pytest.mark.parametrize(
+    ("field", "substitute"),
+    (
+        ("url", "https://example.test/substituted"),
+        ("source_kind", "substituted-kind"),
+        ("continuity_id", "substituted-continuity"),
+        ("required", False),
+        ("license_note", "substituted license note"),
+        ("publication_date", "2026-08-13"),
+    ),
+)
+def test_source_bundle_binds_every_canonical_ledger_field_to_catalog(
+    tmp_path: Path, field: str, substitute: object
+) -> None:
+    """Checksum-valid bytes cannot legitimize substituted catalog metadata."""
+    root = tmp_path / "sources"
+    catalog, ledger, _, _ = _write_bundle(root)
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["records"][0][field] = substitute
+    ledger.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match=rf"source metadata mismatch for fixture: {field}",
+    ):
+        verify_source_bundle(root, ledger, catalog, date(2026, 8, 14))
+
+
+@pytest.mark.parametrize(
     "ledger_payload",
     (
         [],

@@ -13,7 +13,7 @@ from pokemon_league.roster.validate import (
     RosterValidationError,
     validate_roster,
 )
-from pokemon_league.schemas.roster import RosterBuild
+from pokemon_league.schemas.roster import ExcludedForm, RosterBuild
 from tests.factories import combatant_factory
 
 
@@ -269,6 +269,84 @@ def test_audit_revalidates_copied_invalid_nested_models() -> None:
 
     with pytest.raises(RosterValidationError, match="mechanics_eligible"):
         validate_roster(build, _run_config(), False)
+
+
+@pytest.mark.parametrize(
+    "invalid_row",
+    (
+        _numbered(1).model_copy(update={"combatant_id": ["unhashable"]}),
+        object(),
+    ),
+)
+def test_audit_aggregates_copied_invalid_combatant_objects(
+    invalid_row: object,
+) -> None:
+    """Malformed nested values fail through the stable aggregate audit boundary."""
+    build = _build(_numbered(1)).model_copy(update={"combatants": (invalid_row,)})
+
+    with pytest.raises(RosterValidationError, match="invalid combatant at index 0"):
+        validate_roster(build, _run_config(), False)
+
+
+@pytest.mark.parametrize(
+    "invalid_exclusion",
+    (
+        ExcludedForm(
+            source_form_id="cosmetic",
+            display_name="Cosmetic",
+            reason_code="cosmetic_only",
+            reason_text="Not battle distinct.",
+            source_ids=("fixture",),
+            ruleset_version="2026-08-14.1",
+        ).model_copy(update={"source_form_id": ["unhashable"]}),
+        object(),
+    ),
+)
+def test_audit_aggregates_copied_invalid_exclusion_objects(
+    invalid_exclusion: object,
+) -> None:
+    """Exclusion bypass values are revalidated before identifiers are accessed."""
+    build = _build(_numbered(1)).model_copy(
+        update={"exclusions": (invalid_exclusion,)}
+    )
+
+    with pytest.raises(RosterValidationError, match="invalid exclusion at index 0"):
+        validate_roster(build, _run_config(), False)
+
+
+def test_audit_collects_all_malformed_nested_rows_before_raising() -> None:
+    """The stable error exposes every invalid nested position in one audit pass."""
+    invalid_combatant = _numbered(1).model_copy(
+        update={"combatant_id": ["unhashable"]}
+    )
+    invalid_exclusion = ExcludedForm(
+        source_form_id="cosmetic",
+        display_name="Cosmetic",
+        reason_code="cosmetic_only",
+        reason_text="Not battle distinct.",
+        source_ids=("fixture",),
+        ruleset_version="2026-08-14.1",
+    ).model_copy(update={"source_form_id": ["unhashable"]})
+    build = _build(_numbered(1)).model_copy(
+        update={
+            "combatants": (invalid_combatant, object()),
+            "exclusions": (invalid_exclusion, object()),
+        }
+    )
+
+    with pytest.raises(RosterValidationError) as failure:
+        validate_roster(build, _run_config(), False)
+
+    assert {
+        error.split(":", maxsplit=1)[0]
+        for error in failure.value.errors
+        if error.startswith("invalid ")
+    } == {
+        "invalid combatant at index 0",
+        "invalid combatant at index 1",
+        "invalid exclusion at index 0",
+        "invalid exclusion at index 1",
+    }
 
 
 @pytest.mark.parametrize(

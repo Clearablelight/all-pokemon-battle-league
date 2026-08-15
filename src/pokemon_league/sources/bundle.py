@@ -10,9 +10,18 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from pokemon_league.sources.catalog import load_source_catalog
+from pokemon_league.input_capture import CapturedFile, capture_regular_file
+from pokemon_league.sources.catalog import parse_source_catalog
 from pokemon_league.sources.snapshot import SourceRecord
-from pokemon_league.sources.validate import validate_source_ledger
+
+CATALOG_BOUND_FIELDS = (
+    "url",
+    "source_kind",
+    "continuity_id",
+    "required",
+    "license_note",
+    "publication_date",
+)
 
 
 @dataclass(frozen=True)
@@ -22,11 +31,17 @@ class VerifiedSourceBundle:
     records: tuple[SourceRecord, ...]
     coverage_gaps: tuple[str, ...]
     verified_source_ids: frozenset[str]
+    verified_blob_hashes: tuple[tuple[str, str], ...]
 
 
 def load_source_ledger(path: Path) -> tuple[SourceRecord, ...]:
     """Strictly parse the canonical publication ledger envelope."""
-    payload: Any = json.loads(path.read_text(encoding="utf-8"))
+    return parse_source_ledger(capture_regular_file(path).data)
+
+
+def parse_source_ledger(data: bytes) -> tuple[SourceRecord, ...]:
+    """Strictly parse a canonical ledger from exact captured bytes."""
+    payload: Any = json.loads(data.decode("utf-8"))
     if not isinstance(payload, dict) or set(payload) != {"records"}:
         raise ValueError("source ledger must use the exact records envelope")
     values = payload["records"]
@@ -42,10 +57,21 @@ def verify_source_bundle(
     cutoff: date,
 ) -> VerifiedSourceBundle:
     """Verify exact blob placement, catalog coverage, checksums, and sizes offline."""
-    specs = load_source_catalog(catalog_path)
-    records = load_source_ledger(ledger_path)
-    _validate_blob_identities(sources_root, records)
-    record_coverage_gaps = set(validate_source_ledger(records, cutoff=cutoff))
+    ledger = capture_regular_file(ledger_path)
+    catalog = capture_regular_file(catalog_path)
+    return verify_captured_source_bundle(sources_root, ledger, catalog, cutoff)
+
+
+def verify_captured_source_bundle(
+    sources_root: Path,
+    ledger: CapturedFile,
+    catalog: CapturedFile,
+    cutoff: date,
+) -> VerifiedSourceBundle:
+    """Verify a source bundle using the exact captured catalog and ledger bytes."""
+    specs = parse_source_catalog(catalog.data)
+    records = parse_source_ledger(ledger.data)
+    _validate_record_metadata(records, cutoff)
     catalog_by_id = {spec.source_id: spec for spec in specs}
     record_by_id = {record.source_id: record for record in records}
 
@@ -61,6 +87,17 @@ def verify_source_bundle(
         raise ValueError(
             f"missing required catalog source IDs: {', '.join(missing_required)}"
         )
+    for record in records:
+        spec = catalog_by_id[record.source_id]
+        for field in CATALOG_BOUND_FIELDS:
+            if getattr(record, field) != getattr(spec, field):
+                raise ValueError(
+                    f"source metadata mismatch for {record.source_id}: {field}"
+                )
+
+    record_coverage_gaps, verified_blob_hashes = _validate_blob_identities(
+        sources_root, records
+    )
     coverage_gaps = tuple(
         sorted(
             record_coverage_gaps
@@ -86,17 +123,40 @@ def verify_source_bundle(
             "unverified required catalog source IDs: "
             + ", ".join(missing_required_verification)
         )
-    return VerifiedSourceBundle(records, coverage_gaps, verified)
+    return VerifiedSourceBundle(
+        records,
+        coverage_gaps,
+        verified,
+        tuple(
+            (source_id, digest)
+            for source_id, digest in verified_blob_hashes
+            if source_id in verified
+        ),
+    )
+
+
+def _validate_record_metadata(records: tuple[SourceRecord, ...], cutoff: date) -> None:
+    seen: set[str] = set()
+    for record in records:
+        if record.source_id in seen:
+            raise ValueError(f"duplicate source_id: {record.source_id}")
+        seen.add(record.source_id)
+        if record.publication_date is not None and record.publication_date > cutoff:
+            raise ValueError(
+                f"publication_date after cutoff for source_id: {record.source_id}"
+            )
 
 
 def _validate_blob_identities(
     sources_root: Path, records: tuple[SourceRecord, ...]
-) -> None:
+) -> tuple[set[str], tuple[tuple[str, str], ...]]:
     anchored_root = _anchor_lexically(sources_root)
     if _has_lexical_symlink_component(anchored_root):
         raise ValueError(f"symlink sources root: {sources_root}")
     root = Path(os.path.abspath(sources_root)).resolve(strict=False)
     blob_root = root / "blobs"
+    coverage_gaps: set[str] = set()
+    verified_hashes: list[tuple[str, str]] = []
     for record in records:
         anchored_declared = _anchor_lexically(Path(record.blob_path))
         declared = Path(os.path.abspath(record.blob_path))
@@ -108,7 +168,25 @@ def _validate_blob_identities(
                 f"unexpected blob_path for source_id: {record.source_id}; "
                 f"expected {expected}"
             )
-        _assert_regular_nofollow(declared, record.source_id)
+        try:
+            captured = capture_regular_file(declared)
+        except FileNotFoundError:
+            if record.required:
+                raise ValueError(
+                    f"missing required blob for source_id: {record.source_id}"
+                ) from None
+            coverage_gaps.add(record.source_id)
+            continue
+        except ValueError as error:
+            raise ValueError(
+                f"unsafe blob_path for source_id: {record.source_id}"
+            ) from error
+        if captured.sha256 != record.sha256:
+            raise ValueError(f"sha256 mismatch for source_id: {record.source_id}")
+        if captured.byte_count != record.byte_count:
+            raise ValueError(f"byte_count mismatch for source_id: {record.source_id}")
+        verified_hashes.append((record.source_id, captured.sha256))
+    return coverage_gaps, tuple(sorted(verified_hashes))
 
 
 def _has_lexical_symlink_component(path: Path) -> bool:
@@ -131,18 +209,3 @@ def _has_lexical_symlink_component(path: Path) -> bool:
 
 def _anchor_lexically(path: Path) -> Path:
     return path if path.is_absolute() else Path.cwd() / path
-
-
-def _assert_regular_nofollow(path: Path, source_id: str) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except FileNotFoundError:
-        return
-    except OSError as error:
-        raise ValueError(f"unsafe blob_path for source_id: {source_id}") from error
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError(f"unsafe blob_path for source_id: {source_id}")
-    finally:
-        os.close(descriptor)

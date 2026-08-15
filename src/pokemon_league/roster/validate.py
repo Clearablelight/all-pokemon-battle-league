@@ -67,9 +67,11 @@ def validate_roster(
 ) -> RosterAudit:
     """Revalidate a derived build and return its deterministic publication audit."""
     errors: list[str] = []
-    raw_combatants = tuple(build.combatants)
-    raw_exclusions = tuple(build.exclusions)
-    identifiers = [row.combatant_id for row in raw_combatants]
+    raw_combatants = _nested_rows(build, "combatants", errors)
+    raw_exclusions = _nested_rows(build, "exclusions", errors)
+    combatants = _revalidate_combatants(raw_combatants, errors)
+    exclusions = _revalidate_exclusions(raw_exclusions, errors)
+    identifiers = [row.combatant_id for row in combatants]
     duplicates = tuple(
         sorted(
             identifier
@@ -79,8 +81,6 @@ def validate_roster(
     )
     errors.extend(f"duplicate combatant_id: {identifier}" for identifier in duplicates)
 
-    combatants = _revalidate_combatants(raw_combatants, errors)
-    exclusions = _revalidate_exclusions(raw_exclusions, errors)
     _validate_manifest_order(combatants, exclusions, errors)
     _validate_manifest_invariants(combatants, config, errors)
     invalid_alias_groups = _validate_aliases(combatants, errors)
@@ -152,36 +152,61 @@ def validate_roster(
     )
 
 
+def _nested_rows(
+    build: object, field: str, errors: list[str]
+) -> tuple[object, ...]:
+    try:
+        value = getattr(build, field)
+        return tuple(value)
+    except (AttributeError, TypeError):
+        errors.append(f"invalid {field} collection")
+        return ()
+
+
 def _revalidate_combatants(
-    rows: tuple[Combatant, ...], errors: list[str]
+    rows: tuple[object, ...], errors: list[str]
 ) -> tuple[Combatant, ...]:
     validated: list[Combatant] = []
     for index, row in enumerate(rows):
         try:
-            validated.append(Combatant.model_validate(row.model_dump()))
+            validated.append(Combatant.model_validate(_nested_payload(row)))
         except ValidationError as error:
             errors.append(
                 f"invalid combatant at index {index}: {_compact_validation(error)}"
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            errors.append(
+                f"invalid combatant at index {index}: {type(error).__name__}"
             )
     return tuple(validated)
 
 
 def _revalidate_exclusions(
-    rows: tuple[ExcludedForm, ...], errors: list[str]
+    rows: tuple[object, ...], errors: list[str]
 ) -> tuple[ExcludedForm, ...]:
     validated: list[ExcludedForm] = []
     for index, row in enumerate(rows):
         try:
-            validated.append(ExcludedForm.model_validate(row.model_dump()))
+            validated.append(ExcludedForm.model_validate(_nested_payload(row)))
         except ValidationError as error:
             errors.append(
                 f"invalid exclusion at index {index}: {_compact_validation(error)}"
+            )
+        except (AttributeError, TypeError, ValueError) as error:
+            errors.append(
+                f"invalid exclusion at index {index}: {type(error).__name__}"
             )
     identifiers = [row.source_form_id for row in validated]
     for identifier, count in sorted(Counter(identifiers).items()):
         if count > 1:
             errors.append(f"duplicate exclusion source_form_id: {identifier}")
     return tuple(validated)
+
+
+def _nested_payload(row: object) -> object:
+    if isinstance(row, BaseModel):
+        return row.model_dump(warnings=False)
+    return row
 
 
 def _compact_validation(error: ValidationError) -> str:

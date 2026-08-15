@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
 
+from pokemon_league.input_capture import capture_regular_file
 from pokemon_league.sources.snapshot import SourceSpec
 
 PIN_METADATA_KEYS = frozenset({"commit", "package", "version"})
@@ -16,7 +17,12 @@ PIN_METADATA_KEYS = frozenset({"commit", "package", "version"})
 
 def load_source_catalog(path: Path) -> tuple[SourceSpec, ...]:
     """Load an exact catalog, permitting only documented non-schema pin metadata."""
-    payload: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return parse_source_catalog(capture_regular_file(path).data)
+
+
+def parse_source_catalog(data: bytes) -> tuple[SourceSpec, ...]:
+    """Parse the strict catalog from exact captured bytes."""
+    payload: Any = yaml.safe_load(data.decode("utf-8"))
     if not isinstance(payload, dict):
         raise TypeError("source catalog must be an object")
     unknown_top = sorted(set(payload) - {"sources"})

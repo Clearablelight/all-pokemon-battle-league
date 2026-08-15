@@ -1,8 +1,10 @@
 """Strict UTF-8 CSV loading for audited form-decision catalogs."""
 
 import csv
+import io
 from pathlib import Path
 
+from pokemon_league.input_capture import capture_regular_file
 from pokemon_league.schemas.roster import FormDecision
 
 DECISION_CSV_HEADER = (
@@ -44,23 +46,28 @@ _OPTIONAL_TEXT_COLUMNS = (
 
 def load_form_decisions_csv(path: Path) -> tuple[FormDecision, ...]:
     """Load an exact-schema CSV without relaxing audit or provenance fields."""
-    with path.open(encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if tuple(reader.fieldnames or ()) != DECISION_CSV_HEADER:
-            raise ValueError("form-decision CSV must use the exact ordered header")
-        decisions: list[FormDecision] = []
-        seen_source_ids: set[str] = set()
-        for line_number, row in enumerate(reader, start=2):
-            if None in row or any(value is None for value in row.values()):
-                raise ValueError(f"malformed form-decision CSV row {line_number}")
-            parsed = _parse_row(row, line_number)
-            decision = FormDecision.model_validate(parsed)
-            if decision.source_form_id in seen_source_ids:
-                raise ValueError(
-                    f"duplicate decision source_form_id: {decision.source_form_id}"
-                )
-            seen_source_ids.add(decision.source_form_id)
-            decisions.append(decision)
+    return parse_form_decisions_csv(capture_regular_file(path).data)
+
+
+def parse_form_decisions_csv(data: bytes) -> tuple[FormDecision, ...]:
+    """Parse decisions from the same captured bytes used for their audit hash."""
+    handle = io.StringIO(data.decode("utf-8"), newline="")
+    reader = csv.DictReader(handle)
+    if tuple(reader.fieldnames or ()) != DECISION_CSV_HEADER:
+        raise ValueError("form-decision CSV must use the exact ordered header")
+    decisions: list[FormDecision] = []
+    seen_source_ids: set[str] = set()
+    for line_number, row in enumerate(reader, start=2):
+        if None in row or any(value is None for value in row.values()):
+            raise ValueError(f"malformed form-decision CSV row {line_number}")
+        parsed = _parse_row(row, line_number)
+        decision = FormDecision.model_validate(parsed)
+        if decision.source_form_id in seen_source_ids:
+            raise ValueError(
+                f"duplicate decision source_form_id: {decision.source_form_id}"
+            )
+        seen_source_ids.add(decision.source_form_id)
+        decisions.append(decision)
     return tuple(decisions)
 
 

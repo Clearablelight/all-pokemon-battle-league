@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime
@@ -13,19 +12,23 @@ import typer
 import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
-from pokemon_league.config import load_run_config
+from pokemon_league.config import parse_run_config
+from pokemon_league.input_capture import capture_regular_file
 from pokemon_league.io import write_json_atomic
 from pokemon_league.roster.builder import build_roster
 from pokemon_league.roster.equivalence import canonicalize_tracks
 from pokemon_league.roster.evolution import assign_evolution_metadata
-from pokemon_league.roster.loader import load_form_decisions_csv
+from pokemon_league.roster.loader import parse_form_decisions_csv
 from pokemon_league.roster.publish import (
     preflight_publication_targets,
     publish_roster_bundle,
 )
 from pokemon_league.roster.validate import validate_roster
 from pokemon_league.schemas.roster import EvolutionEdge, RawForm
-from pokemon_league.sources.bundle import verify_source_bundle
+from pokemon_league.sources.bundle import (
+    verify_captured_source_bundle,
+    verify_source_bundle,
+)
 from pokemon_league.sources.catalog import load_source_catalog
 from pokemon_league.sources.snapshot import (
     SourceRecord,
@@ -100,15 +103,15 @@ def sources_verify(
         _fail(error)
 
 
-def _load_raw_forms(path: Path) -> tuple[RawForm, ...]:
-    payload: Any = json.loads(path.read_text(encoding="utf-8"))
+def _parse_raw_forms(data: bytes) -> tuple[RawForm, ...]:
+    payload: Any = json.loads(data.decode("utf-8"))
     if not isinstance(payload, list):
         raise TypeError("raw forms must be a JSON array")
     return tuple(RawForm.model_validate(value) for value in payload)
 
 
-def _load_evolution_edges(path: Path) -> tuple[EvolutionEdge, ...]:
-    payload: Any = json.loads(path.read_text(encoding="utf-8"))
+def _parse_evolution_edges(data: bytes) -> tuple[EvolutionEdge, ...]:
+    payload: Any = json.loads(data.decode("utf-8"))
     if not isinstance(payload, list):
         raise TypeError("evolution edges must be a JSON array")
     return tuple(EvolutionEdge.model_validate(value) for value in payload)
@@ -125,14 +128,6 @@ def _check_source_ids(
         raise ValueError(
             f"unknown or unverified source IDs in {kind}: {', '.join(invalid)}"
         )
-
-
-def _digest(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 @roster_app.command("build")
@@ -164,13 +159,24 @@ def roster_build(
     edge_path = edges if edges is not None else sources / "evolution-edges.json"
     ledger_path = sources / "source-ledger.json"
     try:
-        run_config = load_run_config(config)
-        source_bundle = verify_source_bundle(
-            sources, ledger_path, catalog, run_config.evidence_cutoff
+        captured = {
+            "catalog": capture_regular_file(catalog),
+            "config": capture_regular_file(config),
+            "decisions": capture_regular_file(decisions),
+            "evolution_edges": capture_regular_file(edge_path),
+            "raw_forms": capture_regular_file(raw_path),
+            "source_ledger": capture_regular_file(ledger_path),
+        }
+        run_config = parse_run_config(captured["config"].data)
+        source_bundle = verify_captured_source_bundle(
+            sources,
+            captured["source_ledger"],
+            captured["catalog"],
+            run_config.evidence_cutoff,
         )
-        raw_rows = _load_raw_forms(raw_path)
-        decision_rows = load_form_decisions_csv(decisions)
-        evolution_edges = _load_evolution_edges(edge_path)
+        raw_rows = _parse_raw_forms(captured["raw_forms"].data)
+        decision_rows = parse_form_decisions_csv(captured["decisions"].data)
+        evolution_edges = _parse_evolution_edges(captured["evolution_edges"].data)
         _check_source_ids(
             raw_rows, set(source_bundle.verified_source_ids), "raw forms"
         )
@@ -195,17 +201,18 @@ def roster_build(
             update={"coverage_gaps": source_bundle.coverage_gaps}
         )
         input_hashes = {
-            "catalog": _digest(catalog),
-            "config": _digest(config),
-            "decisions": _digest(decisions),
-            "evolution_edges": _digest(edge_path),
-            "raw_forms": _digest(raw_path),
-            **{
-                f"source_blob:{record.source_id}": _digest(Path(record.blob_path))
-                for record in source_bundle.records
-                if record.source_id in source_bundle.verified_source_ids
-            },
-            "source_ledger": _digest(ledger_path),
+            key: captured[key].sha256
+            for key in (
+                "catalog",
+                "config",
+                "decisions",
+                "evolution_edges",
+                "raw_forms",
+                "source_ledger",
+            )
+        } | {
+            f"source_blob:{source_id}": digest
+            for source_id, digest in source_bundle.verified_blob_hashes
         }
         publish_roster_bundle(
             canonical, validated_audit, input_hashes, output, audit

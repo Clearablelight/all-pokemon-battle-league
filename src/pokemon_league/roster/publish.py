@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import fcntl
 import hashlib
 import json
@@ -36,8 +35,6 @@ JOURNAL_KEYS = {
     "state",
     "existed",
     "backups",
-    "parent_intent_indexes",
-    "created_parents",
 }
 
 
@@ -197,29 +194,17 @@ def _publish_locked(
         staged.mkdir()
         backups.mkdir()
         _fsync_directory(transaction)
-        _write_journal(targets, "building", (), (), (), ())
+        _write_journal(targets, "building", (), ())
         published_audit = _stage_artifacts(build, audit, input_hashes, targets, staged)
         existed = _safe_existence_map(targets.paths)
         backup_metadata = _backup_existing_targets(targets.paths, existed, backups)
-        parent_intent_indexes = tuple(
-            index
-            for index, path in enumerate(targets.parent_paths)
-            if not path.exists()
-        )
         _write_journal(
             targets,
             "prepared",
             existed,
             backup_metadata,
-            parent_intent_indexes,
-            (),
         )
-        created_parents = _create_intended_parents(
-            targets,
-            parent_intent_indexes,
-            existed,
-            backup_metadata,
-        )
+        _create_destination_parents(targets)
         for path in targets.paths:
             symlink = _first_symlink_component(path)
             if symlink is not None:
@@ -234,8 +219,6 @@ def _publish_locked(
             "committed",
             existed,
             backup_metadata,
-            parent_intent_indexes,
-            created_parents,
         )
     except Exception:
         journal_path = transaction / JOURNAL_NAME
@@ -351,19 +334,15 @@ def _write_journal(
     state: str,
     existed: tuple[bool, ...],
     backups: tuple[dict[str, object] | None, ...],
-    parent_intent_indexes: tuple[int, ...],
-    created_parents: tuple[dict[str, int], ...],
 ) -> None:
     payload = {
-        "version": 3,
+        "version": 4,
         "target_set_hash": targets.target_set_hash,
         "target_spelling_hash": targets.target_spelling_hash,
         "artifact_count": ARTIFACT_COUNT,
         "state": state,
         "existed": list(existed),
         "backups": list(backups),
-        "parent_intent_indexes": list(parent_intent_indexes),
-        "created_parents": list(created_parents),
     }
     write_json_atomic(targets.transaction_root / JOURNAL_NAME, payload)
     _fsync_directory(targets.transaction_root)
@@ -377,7 +356,7 @@ def _read_journal(targets: PublicationTargets) -> dict[str, object]:
     payload: Any = json.loads(journal_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or set(payload) != JOURNAL_KEYS:
         raise ValueError("invalid publication transaction journal schema")
-    if payload["version"] != 3 or payload["artifact_count"] != ARTIFACT_COUNT:
+    if payload["version"] != 4 or payload["artifact_count"] != ARTIFACT_COUNT:
         raise ValueError("unsupported publication transaction journal")
     if payload["target_set_hash"] != targets.target_set_hash:
         raise ValueError("publication transaction target set mismatch")
@@ -394,40 +373,12 @@ def _validate_journal_maps(
 ) -> None:
     existed = payload["existed"]
     backups = payload["backups"]
-    parent_intents = payload["parent_intent_indexes"]
-    created_parents = payload["created_parents"]
     if not isinstance(existed, list) or any(type(value) is not bool for value in existed):
         raise ValueError("invalid publication transaction existence map")
     if not isinstance(backups, list):
         raise TypeError("invalid publication transaction backup map")
-    if not isinstance(parent_intents, list) or any(
-        type(value) is not int for value in parent_intents
-    ):
-        raise ValueError("invalid publication transaction parent map")
-    if parent_intents != sorted(set(parent_intents)) or any(
-        value < 0 or value >= len(targets.parent_paths) for value in parent_intents
-    ):
-        raise ValueError("invalid publication transaction parent map")
-    if not isinstance(created_parents, list):
-        raise TypeError("invalid publication transaction parent ownership map")
-    created_indexes: list[int] = []
-    for entry in created_parents:
-        if not isinstance(entry, dict) or set(entry) != {"index", "st_dev", "st_ino"}:
-            raise ValueError("invalid publication transaction parent ownership map")
-        if any(type(entry[key]) is not int for key in ("index", "st_dev", "st_ino")):
-            raise ValueError("invalid publication transaction parent ownership map")
-        index = entry["index"]
-        if index < 0 or index >= len(targets.parent_paths):
-            raise ValueError("invalid publication transaction parent ownership index")
-        if entry["st_dev"] < 0 or entry["st_ino"] <= 0:
-            raise ValueError("invalid publication transaction parent ownership identity")
-        created_indexes.append(index)
-    if created_indexes != sorted(set(created_indexes)) or not set(
-        created_indexes
-    ).issubset(parent_intents):
-        raise ValueError("invalid publication transaction parent ownership map")
     if payload["state"] == "building":
-        if existed or backups or parent_intents or created_parents:
+        if existed or backups:
             raise ValueError("invalid building publication transaction maps")
         return
     if len(existed) != ARTIFACT_COUNT or len(backups) != ARTIFACT_COUNT:
@@ -480,7 +431,7 @@ def _restore_prepared(
     if not isinstance(existed, list):
         raise TypeError("journal existence map was not validated")
     _validate_prepared_backups(targets, journal)
-    _validate_restore_destinations(targets, existed, journal)
+    _validate_restore_destinations(targets, existed)
     restores = _prepare_restore_copies(targets, journal)
     for index, (target, was_present) in enumerate(
         zip(targets.paths, existed, strict=True)
@@ -494,7 +445,6 @@ def _restore_prepared(
         elif target.exists():
             target.unlink()
             _fsync_directory(target.parent)
-    _cleanup_created_parents(targets, journal)
     _cleanup_transaction(targets)
 
 
@@ -568,7 +518,6 @@ def _validate_prepared_backups(
 def _validate_restore_destinations(
     targets: PublicationTargets,
     existed: list[object],
-    journal: dict[str, object],
 ) -> None:
     for index, (target, was_present) in enumerate(
         zip(targets.paths, existed, strict=True)
@@ -580,19 +529,6 @@ def _validate_restore_destinations(
             raise ValueError(f"unsafe publication restore destination at index {index}")
         if was_present and not target.parent.is_dir():
             raise ValueError(f"missing publication restore parent at index {index}")
-    created_parents = _created_parent_entries(journal)
-    for entry in created_parents:
-        index = entry["index"]
-        parent = targets.parent_paths[index]
-        if not parent.exists():
-            continue
-        metadata = os.lstat(parent)
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_dev != entry["st_dev"]
-            or metadata.st_ino != entry["st_ino"]
-        ):
-            raise ValueError(f"publication created parent identity changed at index {index}")
 
 
 def _digest_regular_nofollow(path: Path) -> tuple[str, int]:
@@ -608,13 +544,6 @@ def _digest_regular_nofollow(path: Path) -> tuple[str, int]:
     finally:
         os.close(descriptor)
     return digest.hexdigest(), byte_count
-
-
-def _cleanup_created_parents(
-    targets: PublicationTargets, journal: dict[str, object]
-) -> None:
-    for entry in reversed(_created_parent_entries(journal)):
-        _remove_owned_parent(targets.parent_paths[entry["index"]], entry)
 
 
 def _cleanup_transaction(targets: PublicationTargets) -> None:
@@ -639,15 +568,13 @@ def _safe_existence_map(paths: tuple[Path, ...]) -> tuple[bool, ...]:
     return tuple(existed)
 
 
-def _create_intended_parents(
-    targets: PublicationTargets,
-    indexes: tuple[int, ...],
-    existed: tuple[bool, ...],
-    backups: tuple[dict[str, object] | None, ...],
-) -> tuple[dict[str, int], ...]:
-    created: list[dict[str, int]] = []
-    for index in indexes:
-        directory = targets.parent_paths[index]
+def _create_destination_parents(targets: PublicationTargets) -> None:
+    """Create missing target parents but never claim or later delete them."""
+    for index, directory in enumerate(targets.parent_paths):
+        if directory.exists():
+            if directory.is_symlink() or not directory.is_dir():
+                raise ValueError(f"publication parent became unsafe at index {index}")
+            continue
         try:
             _mkdir_parent(directory)
         except FileExistsError:
@@ -662,62 +589,10 @@ def _create_intended_parents(
             raise ValueError(f"publication parent became unsafe at index {index}")
         _fsync_directory(directory)
         _fsync_directory(directory.parent)
-        created.append(
-            {"index": index, "st_dev": metadata.st_dev, "st_ino": metadata.st_ino}
-        )
-        _write_journal(
-            targets,
-            "prepared",
-            existed,
-            backups,
-            indexes,
-            tuple(created),
-        )
-    return tuple(created)
 
 
 def _mkdir_parent(directory: Path) -> None:
     directory.mkdir()
-
-
-def _created_parent_entries(journal: dict[str, object]) -> list[dict[str, int]]:
-    values = journal["created_parents"]
-    if not isinstance(values, list):
-        raise TypeError("journal parent ownership map was not validated")
-    entries: list[dict[str, int]] = []
-    for value in values:
-        if not isinstance(value, dict) or any(
-            not isinstance(value.get(key), int) for key in ("index", "st_dev", "st_ino")
-        ):
-            raise TypeError("journal parent ownership map was not validated")
-        entries.append(
-            {
-                "index": value["index"],
-                "st_dev": value["st_dev"],
-                "st_ino": value["st_ino"],
-            }
-        )
-    return entries
-
-
-def _remove_owned_parent(directory: Path, ownership: dict[str, int]) -> None:
-    try:
-        metadata = os.lstat(directory)
-    except FileNotFoundError:
-        return
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_dev != ownership["st_dev"]
-        or metadata.st_ino != ownership["st_ino"]
-    ):
-        return
-    try:
-        directory.rmdir()
-    except OSError as error:
-        if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
-            raise
-    else:
-        _fsync_directory(directory.parent)
 
 
 def _find_or_choose_transaction_root(

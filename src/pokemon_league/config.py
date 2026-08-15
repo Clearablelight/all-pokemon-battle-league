@@ -4,6 +4,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from pokemon_league.input_capture import capture_regular_file
+
 
 class RunConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -19,5 +21,9 @@ class RunConfig(BaseModel):
 
 
 def load_run_config(path: Path) -> RunConfig:
-    with path.open("rb") as handle:
-        return RunConfig.model_validate(tomllib.load(handle))
+    return parse_run_config(capture_regular_file(path).data)
+
+
+def parse_run_config(data: bytes) -> RunConfig:
+    """Parse a run configuration from the exact captured bytes."""
+    return RunConfig.model_validate(tomllib.loads(data.decode("utf-8")))
