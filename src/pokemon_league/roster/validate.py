@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import date
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -69,17 +69,17 @@ def validate_roster(
     errors: list[str] = []
     raw_combatants = _nested_rows(build, "combatants", errors)
     raw_exclusions = _nested_rows(build, "exclusions", errors)
-    combatants = _revalidate_combatants(raw_combatants, errors)
-    exclusions = _revalidate_exclusions(raw_exclusions, errors)
-    identifiers = [row.combatant_id for row in combatants]
-    duplicates = tuple(
-        sorted(
-            identifier
-            for identifier, count in Counter(identifiers).items()
-            if count > 1
-        )
+    duplicates = _duplicate_raw_identifiers(raw_combatants, "combatant_id")
+    exclusion_duplicates = _duplicate_raw_identifiers(
+        raw_exclusions, "source_form_id"
     )
     errors.extend(f"duplicate combatant_id: {identifier}" for identifier in duplicates)
+    errors.extend(
+        f"duplicate exclusion source_form_id: {identifier}"
+        for identifier in exclusion_duplicates
+    )
+    combatants = _revalidate_combatants(raw_combatants, errors)
+    exclusions = _revalidate_exclusions(raw_exclusions, errors)
 
     _validate_manifest_order(combatants, exclusions, errors)
     _validate_manifest_invariants(combatants, config, errors)
@@ -163,6 +163,33 @@ def _nested_rows(
         return ()
 
 
+def _duplicate_raw_identifiers(
+    rows: tuple[object, ...], field: str
+) -> tuple[str, ...]:
+    identifiers = tuple(
+        identifier
+        for row in rows
+        if (identifier := _usable_raw_identifier(row, field)) is not None
+    )
+    return tuple(
+        sorted(
+            identifier
+            for identifier, count in Counter(identifiers).items()
+            if count > 1
+        )
+    )
+
+
+def _usable_raw_identifier(row: object, field: str) -> str | None:
+    try:
+        value = row.get(field) if isinstance(row, Mapping) else getattr(row, field)
+    except Exception:  # noqa: BLE001 - malformed public nested boundary
+        return None
+    if not isinstance(value, str) or not (identifier := value.strip()):
+        return None
+    return identifier
+
+
 def _revalidate_combatants(
     rows: tuple[object, ...], errors: list[str]
 ) -> tuple[Combatant, ...]:
@@ -196,10 +223,6 @@ def _revalidate_exclusions(
             errors.append(
                 f"invalid exclusion at index {index}: {type(error).__name__}"
             )
-    identifiers = [row.source_form_id for row in validated]
-    for identifier, count in sorted(Counter(identifiers).items()):
-        if count > 1:
-            errors.append(f"duplicate exclusion source_form_id: {identifier}")
     return tuple(validated)
 
 

@@ -349,6 +349,41 @@ def test_audit_collects_all_malformed_nested_rows_before_raising() -> None:
     }
 
 
+def test_audit_reports_duplicate_id_from_copied_invalid_combatant() -> None:
+    """Nested invalidity cannot mask a usable duplicate combatant identifier."""
+    valid = _numbered(1)
+    copied_invalid = valid.model_copy(update={"mechanics_eligible": False})
+    build = _build(valid).model_copy(update={"combatants": (valid, copied_invalid)})
+
+    with pytest.raises(RosterValidationError) as failure:
+        validate_roster(build, _run_config(), False)
+
+    assert failure.value.errors[0] == "duplicate combatant_id: species-0001"
+    assert failure.value.errors[1].startswith("invalid combatant at index 1:")
+
+
+def test_audit_reports_duplicate_id_from_copied_invalid_exclusion() -> None:
+    """Nested invalidity cannot mask a usable duplicate exclusion identifier."""
+    valid = ExcludedForm(
+        source_form_id="cosmetic",
+        display_name="Cosmetic",
+        reason_code="cosmetic_only",
+        reason_text="Not battle distinct.",
+        source_ids=("fixture",),
+        ruleset_version="2026-08-14.1",
+    )
+    copied_invalid = valid.model_copy(update={"source_ids": ()})
+    build = _build(_numbered(1)).model_copy(
+        update={"exclusions": (valid, copied_invalid)}
+    )
+
+    with pytest.raises(RosterValidationError) as failure:
+        validate_roster(build, _run_config(), False)
+
+    assert failure.value.errors[0] == "duplicate exclusion source_form_id: cosmetic"
+    assert failure.value.errors[1].startswith("invalid exclusion at index 1:")
+
+
 @pytest.mark.parametrize(
     ("row", "message"),
     (
