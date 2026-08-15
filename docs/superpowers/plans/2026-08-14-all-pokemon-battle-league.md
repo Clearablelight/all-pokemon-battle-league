@@ -4,7 +4,7 @@
 
 **Goal:** Execute the approved exhaustive game-mechanics, lore/animation, evolution-family, consensus, lookup, and portable-report design from frozen sources through verified final artifacts.
 
-**Architecture:** Four independently reviewable plans share versioned Python schemas and immutable source/phase receipts. Foundation runs first; mechanics and lore then run in parallel from the same canonical roster; ranking/report joins only validated canonical outputs and packages one answer-first HTML report.
+**Architecture:** The plan suite shares versioned Python schemas and immutable source/phase receipts. Foundation machinery runs first, the production-roster completion gate then proves real source/identity data, mechanics and lore run in parallel from the same canonical roster, and ranking/report joins only validated canonical outputs into one answer-first HTML report.
 
 **Tech Stack:** Python 3.12 data/evidence/ranking pipeline; Node.js 22 and TypeScript mechanics worker; pinned Pokémon Showdown; PyArrow interchange; deterministic source/model/seed hashes; Data Analytics canonical portable report renderer.
 
@@ -17,7 +17,7 @@
 - Every phase writes a receipt with input hashes, output hashes, counts, versions, thresholds, seed identities, limitations, and completion state.
 - A failed required-source, roster, legality, evidence, pair-count, champion-sensitivity, or artifact validation gate stops downstream finalization.
 - Network retrieval is confined to the source-lock phase; scoring, simulation, ranking, lookup, and report packaging run offline from verified snapshots.
-- Mechanics and lore may execute concurrently only after the foundation receipt passes; ranking/report begins only after both phase receipts pass.
+- Mechanics and lore may execute concurrently only after the production Foundation receipt passes; ranking/report begins only after both downstream phase receipts pass.
 - No ordinary item, trainer, teammate, switching, lethal death-battle rule, universal modifier duplication, fabricated unreleased profile, or forced categorical winner may enter downstream work.
 - Final user-facing deliverables are limited to the files named by the design and live under `outputs/`; intermediate work remains under `work/`.
 
@@ -26,10 +26,11 @@
 ## Plan suite and execution order
 
 1. [`2026-08-14-all-pokemon-foundation-roster.md`](2026-08-14-all-pokemon-foundation-roster.md) — environment, source ledger, manifest, exclusions, equivalence, and evolution mapping.
-2. Run these two plans concurrently after the foundation gate:
+2. [`2026-08-15-all-pokemon-production-roster.md`](2026-08-15-all-pokemon-production-roster.md) — semantic source verification, pinned candidate extraction, full decision audit, and the real Foundation receipt.
+3. Run these two plans concurrently only after the production Foundation receipt passes:
    - [`2026-08-14-all-pokemon-game-mechanics.md`](2026-08-14-all-pokemon-game-mechanics.md) — legal profiles/builds, controller, calibration, exhaustive mechanics pairs, and uncertainty.
    - [`2026-08-14-all-pokemon-lore-adjudication.md`](2026-08-14-all-pokemon-lore-adjudication.md) — evidence, dossiers, arenas, fighting-style adjudication, exhaustive lore pairs, and review.
-3. [`2026-08-14-all-pokemon-ranking-report.md`](2026-08-14-all-pokemon-ranking-report.md) — pair audits, four leaderboards, consensus, every family matchup, lookup, run manifest, and portable HTML.
+4. [`2026-08-14-all-pokemon-ranking-report.md`](2026-08-14-all-pokemon-ranking-report.md) — pair audits, four leaderboards, consensus, every family matchup, lookup, run manifest, and portable HTML.
 
 Each worker must read this index, the controlling design, and its assigned plan before editing. A worker may change only files owned by its plan unless the cross-plan interface itself is being reviewed and updated in all consumers in the same commit.
 
@@ -68,18 +69,18 @@ Every exhaustive phase shards deterministically, validates `.partial` files befo
 | Design section | Implemented by |
 |---|---|
 | 1–3 goal, constraints, reporting job | Index plus report Tasks 5–6 |
-| 4 contestant manifest and forms | Foundation Tasks 2, 4–6 |
+| 4 contestant manifest and forms | Foundation Tasks 2, 4–6; production-roster Tasks 2–5 |
 | 5 shared fight rules | Mechanics Tasks 1–4; lore Tasks 3–5 |
 | 6 mechanics track | Mechanics Tasks 1–6 |
 | 7 lore/animation track | Lore Tasks 1–6 |
 | 8 pair accounting and ranking | Ranking/report Tasks 1–2 and 4 |
-| 9 evolution-family coverage | Foundation Task 5; ranking/report Task 3 |
+| 9 evolution-family coverage | Foundation Task 5; production-roster Tasks 2–5; ranking/report Task 3 |
 | 10 component boundaries | All four plans and cross-plan contracts above |
 | 11 deliverables | Ranking/report Tasks 1, 3, 4, and 6 |
 | 12 report structure | Ranking/report Tasks 5–6 |
 | 13 validation gates | Tests in every task; finalization Task 4; report Task 6 |
 | 14 limitations | Phase receipts, run manifest, and report caveats |
-| 15 source baseline | Foundation Task 3 and source lock |
+| 15 source baseline | Foundation Task 3 and production-roster Task 1 |
 | 16 acceptance criteria | Ranking/report Tasks 4 and 6 |
 | 17 out of scope | Foundation rules, mechanics format, lore policy, final validator |
 
@@ -90,8 +91,11 @@ After task-level commits and phase receipts pass, run from the repository root:
 ```bash
 .venv/bin/pip install --require-hashes -r requirements.lock
 pnpm install --frozen-lockfile
-.venv/bin/pokemon-league sources verify --ledger work/sources/source-ledger.json --offline
-.venv/bin/pokemon-league roster build --sources work/sources --output outputs --require-cutoff-counts
+.venv/bin/pokemon-league sources verify --ledger work/sources-production/source-ledger.json --catalog config/sources.yaml --phase foundation --cutoff 2026-08-14 --offline
+.venv/bin/pokemon-league roster extract --sources work/sources-production --output work/roster-production
+.venv/bin/pokemon-league roster decisions verify --candidates work/roster-production/source-form-candidates.json --decisions config/roster-decisions.csv
+.venv/bin/pokemon-league roster build --sources work/sources-production --raw-forms work/roster-production/raw-forms.json --edges work/roster-production/evolution-edges.json --decisions config/roster-decisions.csv --output outputs --audit work/roster-production/roster-audit.json --require-cutoff-counts
+.venv/bin/pokemon-league phase receipt --phase foundation-roster --output work/phase-receipts/foundation-roster.json
 .venv/bin/pokemon-league game run --config config/run.toml --combatants outputs/combatants.parquet --work work/game --output outputs
 .venv/bin/pokemon-league lore run --config config/run.toml --combatants outputs/combatants.parquet --evidence data/lore --work work/lore --output outputs
 .venv/bin/pokemon-league finalize --config config/run.toml --work work --output outputs
